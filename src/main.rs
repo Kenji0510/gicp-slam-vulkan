@@ -1,6 +1,11 @@
 use anyhow::{Context, Result};
 use gicp_slam_vulkan::{
-    convert_type::{convert_pcd_to_xyz, convert_vec_to_xyz, convert_xyz_to_vec}, file_handler::{load_imu_data, load_pcd_files, load_pcd_xyzit, save_pcd_xyzit}, gpu_voxel::VoxelGpuContext, init_gpu::VulkanContext, predict_pose_by_imu::align_imu_timestamps
+    convert_type::{convert_pcd_to_xyz, convert_vec_to_xyz, convert_xyz_to_vec},
+    file_handler::{load_imu_data, load_pcd_files, load_pcd_xyzit, save_pcd_xyzit},
+    gpu_transfer_data::GpuTransferDataContext,
+    gpu_voxel::VoxelGpuContext,
+    init_gpu::VulkanContext,
+    predict_pose_by_imu::align_imu_timestamps,
 };
 use nalgebra::{Matrix4, Quaternion, UnitQuaternion, Vector3};
 
@@ -32,6 +37,8 @@ fn main() -> Result<()> {
 
     // --- Initialize Vulkan context ---
     let vulkan_context = VulkanContext::new().context("Failed to initialize Vulkan context")?;
+    let mut copy_gpu_context = GpuTransferDataContext::new(vulkan_context.clone())
+        .context("Failed to create GPU transfer context")?;
     let mut voxel_gpu_context = VoxelGpuContext::new(vulkan_context.clone());
     // --- Initialize Vulkan context ---
 
@@ -65,11 +72,16 @@ fn main() -> Result<()> {
 
     let points_vec = convert_xyz_to_vec(&pcd);
 
+    // --- Copy points to gpu memory ---
+    copy_gpu_context.copy_data_to_gpu(&points_vec, points_vec.len())?;
+    // --- Copy points to gpu memory ---
+
     // --- Downsample for density normalization ---
     let downsample_voxel_size = DOWNSAMPLE_VOXEL_SIZE;
     let points_num = points_vec.len();
 
-    let downsampled_points_vec = voxel_gpu_context?.voxelization(&points_vec, points_num, downsample_voxel_size)?;
+    let downsampled_points_vec =
+        voxel_gpu_context?.voxelization(&points_vec, points_num, downsample_voxel_size)?;
     // let downsampled_init_points = voxel_downsample_points(&points, downsample_voxel_size);
 
     // let downsampled_pcd = convert_vec_to_xyz(&downsampled_points_vec);
