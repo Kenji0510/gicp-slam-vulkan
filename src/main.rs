@@ -1,11 +1,11 @@
 use anyhow::{Context, Result};
 use gicp_slam_vulkan::{
-    convert_type::convert_pcd_to_xyz, file_handler::{load_imu_data, load_pcd_files, load_pcd_xyzit}, init_gpu::VulkanContext, predict_pose_by_imu::align_imu_timestamps
+    convert_type::{convert_pcd_to_xyz, convert_vec_to_xyz, convert_xyz_to_vec}, file_handler::{load_imu_data, load_pcd_files, load_pcd_xyzit, save_pcd_xyzit}, gpu_voxel::VoxelGpuContext, init_gpu::VulkanContext, predict_pose_by_imu::align_imu_timestamps
 };
 use nalgebra::{Matrix4, Quaternion, UnitQuaternion, Vector3};
 
-const LOAD_DIR: &str = "/home/kenji/workspace/rust/get_lidar_data/data/output/05172026/park08";
-const SAVE_DIR: &str = "data/output/debug/05172026/park08";
+const LOAD_DIR: &str = "data/input/05172026/park01";
+const SAVE_DIR: &str = "data/output/05182026/park01";
 
 const DOWNSAMPLE_VOXEL_SIZE: f32 = 0.2; // m
 const GICP_ITERATIONS: usize = 5;
@@ -32,6 +32,7 @@ fn main() -> Result<()> {
 
     // --- Initialize Vulkan context ---
     let vulkan_context = VulkanContext::new().context("Failed to initialize Vulkan context")?;
+    let mut voxel_gpu_context = VoxelGpuContext::new(vulkan_context.clone());
     // --- Initialize Vulkan context ---
 
     let pcd_dir = format!("{}/pcd", LOAD_DIR);
@@ -60,12 +61,20 @@ fn main() -> Result<()> {
     let mut current_velocity = Vector3::<f64>::zeros();
 
     let pcd = load_pcd_xyzit(&pcd_files[0].to_string_lossy())?;
-    let points = convert_pcd_to_xyz(&pcd);
+    // let points = convert_pcd_to_xyz(&pcd);
+
+    let points_vec = convert_xyz_to_vec(&pcd);
 
     // --- Downsample for density normalization ---
     let downsample_voxel_size = DOWNSAMPLE_VOXEL_SIZE;
+    let points_num = points_vec.len();
 
+    let downsampled_points_vec = voxel_gpu_context?.voxelization(&points_vec, points_num, downsample_voxel_size)?;
     // let downsampled_init_points = voxel_downsample_points(&points, downsample_voxel_size);
+
+    // let downsampled_pcd = convert_vec_to_xyz(&downsampled_points_vec);
+    // let save_file = format!("{}/debug/downsampled_init.pcd", SAVE_DIR);
+    // save_pcd_xyzit(&downsampled_pcd, &save_file)?;
     // --- Downsample for density normalization ---
 
     Ok(())

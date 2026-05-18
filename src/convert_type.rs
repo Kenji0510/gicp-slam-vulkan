@@ -18,3 +18,20 @@ pub fn convert_xyz_to_pcd(points: &[Point3<f32>]) -> Vec<PointXYZIT> {
         })
         .collect()
 }
+
+pub fn convert_xyz_to_vec(points: &[PointXYZIT]) -> Vec<[f32; 3]> {
+    points.iter().map(|p| [p.x, p.y, p.z]).collect()
+}
+
+pub fn convert_vec_to_xyz(points: &[[f32; 3]]) -> Vec<PointXYZIT> {
+    points
+        .iter()
+        .map(|p| PointXYZIT {
+            x: p[0],
+            y: p[1],
+            z: p[2],
+            intensity: 0.0,
+            timestamp: 0.0,
+        })
+        .collect()
+}
