@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
-use log::debug;
 use core::num;
+use log::debug;
 use std::{sync::Arc, time::Instant};
 use vulkano::{
     buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer},

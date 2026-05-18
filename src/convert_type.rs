@@ -35,3 +35,7 @@ pub fn convert_vec_to_xyz(points: &[[f32; 3]]) -> Vec<PointXYZIT> {
         })
         .collect()
 }
+
+pub fn convert_point3_to_vec(points: &[Point3<f32>]) -> Vec<[f32; 3]> {
+    points.iter().map(|p| [p.x, p.y, p.z]).collect()
+}

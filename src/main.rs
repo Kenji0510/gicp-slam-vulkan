@@ -1,11 +1,14 @@
 use anyhow::{Context, Result};
 use gicp_slam_vulkan::{
-    convert_type::{convert_pcd_to_xyz, convert_vec_to_xyz, convert_xyz_to_vec},
+    convert_type::{
+        convert_pcd_to_xyz, convert_point3_to_vec, convert_vec_to_xyz, convert_xyz_to_vec,
+    },
+    deskew_points::deskew_points,
     file_handler::{load_imu_data, load_pcd_files, load_pcd_xyzit, save_pcd_xyzit},
     gpu_transfer_data::GpuTransferDataContext,
     gpu_voxel::VoxelGpuContext,
     init_gpu::VulkanContext,
-    predict_pose_by_imu::align_imu_timestamps,
+    predict_pose_by_imu::{align_imu_timestamps, build_rotation_trajectory, predict_pose_by_imu},
 };
 use nalgebra::{Matrix4, Quaternion, UnitQuaternion, Vector3};
 
@@ -39,7 +42,7 @@ fn main() -> Result<()> {
     let vulkan_context = VulkanContext::new().context("Failed to initialize Vulkan context")?;
     let mut copy_gpu_context = GpuTransferDataContext::new(vulkan_context.clone())
         .context("Failed to create GPU transfer context")?;
-    let mut voxel_gpu_context = VoxelGpuContext::new(vulkan_context.clone());
+    let mut voxel_gpu_context = VoxelGpuContext::new(vulkan_context.clone())?;
     // --- Initialize Vulkan context ---
 
     let pcd_dir = format!("{}/pcd", LOAD_DIR);
@@ -81,13 +84,75 @@ fn main() -> Result<()> {
     let points_num = points_vec.len();
 
     let downsampled_points_vec =
-        voxel_gpu_context?.voxelization(&copy_gpu_context, downsample_voxel_size)?;
+        voxel_gpu_context.voxelization(&copy_gpu_context, downsample_voxel_size)?;
     // let downsampled_init_points = voxel_downsample_points(&points, downsample_voxel_size);
 
     // let downsampled_pcd = convert_vec_to_xyz(&downsampled_points_vec);
     // let save_file = format!("{}/debug/downsampled_init.pcd", SAVE_DIR);
     // save_pcd_xyzit(&downsampled_pcd, &save_file)?;
     // --- Downsample for density normalization ---
+
+    let mut prev_frame_start_time = pcd
+        .iter()
+        .map(|p| p.timestamp)
+        .fold(f64::INFINITY, f64::min);
+
+    for (i, pcd_path) in pcd_files.iter().enumerate().skip(1) {
+        log::info!("Processing frame {}: {}", i, pcd_path.to_string_lossy());
+
+        let source_pcd = load_pcd_xyzit(&pcd_path.to_string_lossy())?;
+
+        // --- Predict pose by IMU ---
+        let current_frame_start_time = source_pcd
+            .iter()
+            .map(|p| p.timestamp)
+            .fold(f64::INFINITY, f64::min);
+        let current_frame_end_time = source_pcd
+            .iter()
+            .map(|p| p.timestamp)
+            .fold(f64::NEG_INFINITY, f64::max);
+
+        // 既にGlobal座標でのcurrent_global_poseがある状態で、次フレームの開始時刻までのIMU積分を行う。
+        let pose_prediction = predict_pose_by_imu(
+            &imu_data,
+            &imu_to_lidar,
+            &current_global_pose,
+            &current_velocity,
+            prev_frame_start_time,
+            current_frame_start_time,
+        );
+
+        let rotation_traj = build_rotation_trajectory(
+            &imu_data,
+            current_frame_start_time,
+            current_frame_end_time,
+            &imu_to_lidar,
+        );
+
+        // --- Deskew source pcd ---
+        let deskewed_points = deskew_points(
+            &source_pcd,
+            &rotation_traj,
+            &imu_to_lidar,
+            current_frame_start_time,
+            MIN_DIST,
+            MAX_DIST,
+        );
+        // --- Deskew source pcd ---
+
+        let points_vec = convert_point3_to_vec(&deskewed_points);
+
+        // --- Copy points to gpu memory ---
+        copy_gpu_context.copy_data_to_gpu(&points_vec, points_vec.len())?;
+        // --- Copy points to gpu memory ---
+
+        // --- Downsample for density normalization ---
+        let downsampled_points_vec =
+            voxel_gpu_context.voxelization(&copy_gpu_context, downsample_voxel_size)?;
+        // --- Downsample for density normalization ---
+
+        let mut current_transform = pose_prediction.0;
+    }
 
     Ok(())
 }
