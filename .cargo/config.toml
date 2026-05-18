@@ -1,0 +1,2 @@
+[env]
+SHADERC_LIB_DIR = "/usr/lib64"
