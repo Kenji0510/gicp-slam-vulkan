@@ -81,7 +81,7 @@ fn main() -> Result<()> {
     let points_num = points_vec.len();
 
     let downsampled_points_vec =
-        voxel_gpu_context?.voxelization(&points_vec, points_num, downsample_voxel_size)?;
+        voxel_gpu_context?.voxelization(&copy_gpu_context, downsample_voxel_size)?;
     // let downsampled_init_points = voxel_downsample_points(&points, downsample_voxel_size);
 
     // let downsampled_pcd = convert_vec_to_xyz(&downsampled_points_vec);

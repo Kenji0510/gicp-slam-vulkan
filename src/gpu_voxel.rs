@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use log::debug;
+use core::num;
 use std::{sync::Arc, time::Instant};
 use vulkano::{
     buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer},
@@ -13,7 +14,7 @@ use vulkano::{
     sync::{self, GpuFuture},
 };
 
-use crate::init_gpu::VulkanContext;
+use crate::{gpu_transfer_data::GpuTransferDataContext, init_gpu::VulkanContext};
 
 #[derive(bytemuck::Pod, bytemuck::Zeroable, Clone, Copy)]
 #[repr(C)]
@@ -37,7 +38,6 @@ pub struct VoxelGpuContext {
     descriptor_set_layout_insert: Arc<DescriptorSetLayout>,
     descriptor_set_layout_compact: Arc<DescriptorSetLayout>,
 
-    // staging_h_buf_input_pts: Option<Subbuffer<[f32]>>,
     pub d_buf_input_pts: Option<Subbuffer<[f32]>>,
     pub d_buf_keys: Option<Subbuffer<[u32]>>,
     pub d_buf_centroids: Option<Subbuffer<[u32]>>,
@@ -47,7 +47,7 @@ pub struct VoxelGpuContext {
     pub d_buf_table_voxel_indices: Option<Subbuffer<[u32]>>,
     pub d_buf_cluster_ids: Option<Subbuffer<[u32]>>,
 
-    staging_buf_input_pts: Option<Subbuffer<[f32]>>,
+    // staging_buf_input_pts: Option<Subbuffer<[f32]>>,
     pub staging_buf_output_pts: Option<Subbuffer<[f32]>>,
     pub staging_buf_output_counter: Option<Subbuffer<[u32]>>,
 
@@ -181,7 +181,7 @@ impl VoxelGpuContext {
             d_buf_counts: None,
             d_buf_out_pts: None,
             d_buf_counter: None,
-            staging_buf_input_pts: None,
+            // staging_buf_input_pts: None,
             staging_buf_output_pts: None,
             staging_buf_output_counter: None,
             current_capacity_pts: 0,
@@ -197,10 +197,10 @@ impl VoxelGpuContext {
 
     pub fn voxelization(
         &mut self,
-        pts: &[[f32; 3]],
-        num_pts: usize,
+        data_on_gpu: &GpuTransferDataContext,
         voxel_size: f32,
     ) -> Result<Vec<[f32; 3]>> {
+        let num_pts = data_on_gpu.num_points as usize;
         if num_pts == 0 {
             return Ok(vec![]);
         }
@@ -228,6 +228,8 @@ impl VoxelGpuContext {
             _pad: 0,
         };
 
+        self.d_buf_input_pts = data_on_gpu.d_buf_input_pts.clone();
+
         if self.current_capacity_pts < num_pts {
             debug!("Reallocating buffers for {} points", num_pts);
 
@@ -236,32 +238,32 @@ impl VoxelGpuContext {
             let new_table_size = new_capacity * 4;
 
             // For input points
-            self.staging_buf_input_pts = Some(Buffer::new_slice::<f32>(
-                memory_allocator.clone(),
-                BufferCreateInfo {
-                    usage: BufferUsage::TRANSFER_SRC,
-                    ..Default::default()
-                },
-                AllocationCreateInfo {
-                    memory_type_filter: MemoryTypeFilter::PREFER_HOST
-                        | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                    ..Default::default()
-                },
-                (new_capacity * 3) as u64,
-            )?);
+            // self.staging_buf_input_pts = Some(Buffer::new_slice::<f32>(
+            //     memory_allocator.clone(),
+            //     BufferCreateInfo {
+            //         usage: BufferUsage::TRANSFER_SRC,
+            //         ..Default::default()
+            //     },
+            //     AllocationCreateInfo {
+            //         memory_type_filter: MemoryTypeFilter::PREFER_HOST
+            //             | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+            //         ..Default::default()
+            //     },
+            //     (new_capacity * 3) as u64,
+            // )?);
 
-            self.d_buf_input_pts = Some(Buffer::new_slice::<f32>(
-                memory_allocator.clone(),
-                BufferCreateInfo {
-                    usage: BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST,
-                    ..Default::default()
-                },
-                AllocationCreateInfo {
-                    memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
-                    ..Default::default()
-                },
-                (new_capacity * 3) as u64,
-            )?);
+            // self.d_buf_input_pts = Some(Buffer::new_slice::<f32>(
+            //     memory_allocator.clone(),
+            //     BufferCreateInfo {
+            //         usage: BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST,
+            //         ..Default::default()
+            //     },
+            //     AllocationCreateInfo {
+            //         memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
+            //         ..Default::default()
+            //     },
+            //     (new_capacity * 3) as u64,
+            // )?);
 
             self.d_buf_keys = Some(Buffer::new_slice::<u32>(
                 memory_allocator.clone(),
@@ -383,14 +385,13 @@ impl VoxelGpuContext {
             )?);
         }
 
-        // let flattened_pts: Vec<f32> = pts.iter().flat_map(|arr| arr.iter().copied()).collect();
         // input points
-        if let Some(staging_buf) = &self.staging_buf_input_pts {
-            let mut mapping = staging_buf.write()?;
-            for (chunk, pt) in mapping.chunks_exact_mut(3).zip(pts.iter()) {
-                chunk.copy_from_slice(pt);
-            }
-        }
+        // if let Some(staging_buf) = &self.staging_buf_input_pts {
+        //     let mut mapping = staging_buf.write()?;
+        //     for (chunk, pt) in mapping.chunks_exact_mut(3).zip(pts.iter()) {
+        //         chunk.copy_from_slice(pt);
+        //     }
+        // }
 
         let descriptor_set_init = DescriptorSet::new(
             descriptor_set_allocator.clone(),
@@ -433,13 +434,6 @@ impl VoxelGpuContext {
                         .context("d_buf_table_voxel_indices is None")?
                         .clone(),
                 ),
-                // WriteDescriptorSet::buffer(
-                //     7,
-                //     self.d_buf_cluster_ids
-                //         .as_ref()
-                //         .context("d_buf_cluster_ids is None")?
-                //         .clone(),
-                // ),
             ],
             [],
         )
@@ -550,19 +544,19 @@ impl VoxelGpuContext {
         )
         .context("Failed to create command buffer builder")?;
 
-        let copy_src = self
-            .staging_buf_input_pts
-            .as_ref()
-            .context("staging_buf_input_pts is None")?
-            .clone()
-            .slice(0..(num_pts * 3) as u64);
-        let copy_dst = self
-            .d_buf_input_pts
-            .as_ref()
-            .context("d_buf_input_pts is None")?
-            .clone()
-            .slice(0..(num_pts * 3) as u64);
-        command_buffer_builder.copy_buffer(CopyBufferInfo::buffers(copy_src, copy_dst))?;
+        // let copy_src = self
+        //     .staging_buf_input_pts
+        //     .as_ref()
+        //     .context("staging_buf_input_pts is None")?
+        //     .clone()
+        //     .slice(0..(num_pts * 3) as u64);
+        // let copy_dst = self
+        //     .d_buf_input_pts
+        //     .as_ref()
+        //     .context("d_buf_input_pts is None")?
+        //     .clone()
+        //     .slice(0..(num_pts * 3) as u64);
+        // command_buffer_builder.copy_buffer(CopyBufferInfo::buffers(copy_src, copy_dst))?;
 
         const LOCAL_SIZE: u32 = 256;
         let group_count_x = (table_size as u32 + LOCAL_SIZE - 1) / LOCAL_SIZE;
