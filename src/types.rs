@@ -50,3 +50,13 @@ pub struct FrameData {
     pub points: Vec<Point3<f32>>,
     pub covariances: Vec<[[f32; 3]; 3]>,
 }
+
+#[derive(Debug, Clone, PcdDeserialize, PcdSerialize)]
+pub struct PointXYZNormal {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub normal_x: f32,
+    pub normal_y: f32,
+    pub normal_z: f32,
+}

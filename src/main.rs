@@ -4,7 +4,11 @@ use gicp_slam_vulkan::{
         convert_pcd_to_xyz, convert_point3_to_vec, convert_vec_to_xyz, convert_xyz_to_vec,
     },
     deskew_points::deskew_points,
-    file_handler::{load_imu_data, load_pcd_files, load_pcd_xyzit, save_pcd_xyzit},
+    file_handler::{
+        load_imu_data, load_pcd_files, load_pcd_xyzit, save_pcd_xyzit, save_pcd_xyznormal,
+    },
+    gpu_knn_search,
+    gpu_normals::{self, NormalParams, combine_pts_with_normals},
     gpu_transfer_data::GpuTransferDataContext,
     gpu_voxel::VoxelGpuContext,
     init_gpu::VulkanContext,
@@ -43,6 +47,8 @@ fn main() -> Result<()> {
     let mut copy_gpu_context = GpuTransferDataContext::new(vulkan_context.clone())
         .context("Failed to create GPU transfer context")?;
     let mut voxel_gpu_context = VoxelGpuContext::new(vulkan_context.clone())?;
+    let mut knn_gpu_context = gpu_knn_search::KnnSearchGpuContext::new(vulkan_context.clone())?;
+    let mut normals_gpu_context = gpu_normals::NormalsGpuContext::new(vulkan_context.clone())?;
     // --- Initialize Vulkan context ---
 
     let pcd_dir = format!("{}/pcd", LOAD_DIR);
@@ -152,6 +158,29 @@ fn main() -> Result<()> {
         // --- Downsample for density normalization ---
 
         let mut current_transform = pose_prediction.0;
+
+        // --- Compute covariance for each point ---
+        knn_gpu_context.knn_search_neighbors(&voxel_gpu_context)?;
+
+        let normal_params = NormalParams {
+            num_points: voxel_gpu_context.h_downsampled_pts_num as u32,
+            vp_x: 0.0,
+            vp_y: 0.0,
+            vp_z: 0.0,
+        };
+        let normals = normals_gpu_context.compute_normals(
+            &voxel_gpu_context,
+            &knn_gpu_context,
+            normal_params,
+        )?;
+
+        // --- Debug ---
+        let pcd_xyznormals = combine_pts_with_normals(&downsampled_points_vec, &normals)?;
+        let save_path = format!("{}/debug/pcd_with_normals_{:04}.pcd", SAVE_DIR, i);
+
+        save_pcd_xyznormal(&pcd_xyznormals, &save_path)?;
+        // --- Debug ---
+        // --- Compute covariance for each point ---
     }
 
     Ok(())

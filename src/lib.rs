@@ -2,6 +2,8 @@ pub mod convert_imu_data;
 pub mod convert_type;
 pub mod deskew_points;
 pub mod file_handler;
+pub mod gpu_knn_search;
+pub mod gpu_normals;
 pub mod gpu_transfer_data;
 pub mod gpu_voxel;
 pub mod init_gpu;

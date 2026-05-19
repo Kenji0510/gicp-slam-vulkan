@@ -3,7 +3,7 @@ use std::{fs, path::PathBuf};
 use anyhow::{Context, Result};
 use pcd_rs::Reader;
 
-use crate::types::{LoadIMU, PointXYZ, PointXYZCov, PointXYZIT};
+use crate::types::{LoadIMU, PointXYZ, PointXYZCov, PointXYZIT, PointXYZNormal};
 
 pub fn load_pcd_files(dir_path: &str) -> Result<Vec<PathBuf>> {
     // let re = regex::Regex::new(r"voxelized-005_frame_(\d+)\.pcd$")
@@ -128,4 +128,22 @@ pub fn load_pcd_xyzit(file_path: &str) -> Result<Vec<PointXYZIT>> {
     };
 
     Ok(points)
+}
+
+pub fn save_pcd_xyznormal(points: &[PointXYZNormal], file_path: &str) -> Result<()> {
+    let mut writer = pcd_rs::WriterInit {
+        width: 1,
+        height: points.len() as u64,
+        viewpoint: Default::default(),
+        data_kind: pcd_rs::DataKind::Ascii,
+        schema: None,
+    }
+    .create(file_path)?;
+
+    for point in points {
+        writer.push(point)?;
+    }
+    writer.finish()?;
+
+    Ok(())
 }

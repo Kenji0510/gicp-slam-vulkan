@@ -351,6 +351,7 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "env_logger",
+ "foldhash",
  "log",
  "nalgebra",
  "pcd-rs",
