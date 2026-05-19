@@ -25,33 +25,30 @@ const K_NEIGHBORS: usize = 8;
 
 #[derive(bytemuck::Pod, bytemuck::Zeroable, Clone, Copy)]
 #[repr(C)]
-pub struct NormalParams {
+pub struct CovarianceParams {
     pub num_points: u32,
-    pub vp_x: f32,
-    pub vp_y: f32,
-    pub vp_z: f32,
 }
 
-pub struct NormalsGpuContext {
+pub struct CovarianceGpuContext {
     vulkan_context: VulkanContext,
 
     compute_pipeline_search: Arc<ComputePipeline>,
     pipeline_layout_search: Arc<PipelineLayout>,
     descriptor_set_layout_search: Arc<DescriptorSetLayout>,
 
-    pub d_buf_normals: Option<Subbuffer<[f32]>>,
+    pub d_buf_covariances: Option<Subbuffer<[f32]>>,
 
-    pub staging_buf_normals: Option<Subbuffer<[f32]>>,
+    pub staging_buf_covariances: Option<Subbuffer<[f32]>>,
 
     pub current_capacity_pts: usize,
 }
 
-impl NormalsGpuContext {
+impl CovarianceGpuContext {
     pub fn new(vulkan_context: VulkanContext) -> Result<Self> {
         mod cs_normals {
             vulkano_shaders::shader! {
                 ty: "compute",
-                path: "src/kernels/normals/normals.glsl",
+                path: "src/kernels/covariances/covariance.glsl",
             }
         }
 
@@ -96,18 +93,17 @@ impl NormalsGpuContext {
             compute_pipeline_search: compute_pipeline_normals.clone(),
             pipeline_layout_search: pipeline_layout_normals.clone(),
             descriptor_set_layout_search: descriptor_set_layout_normals.clone(),
-            d_buf_normals: None,
-            staging_buf_normals: None,
+            d_buf_covariances: None,
+            staging_buf_covariances: None,
             current_capacity_pts: 0,
         })
     }
 
-    pub fn compute_normals(
+    pub fn compute_covariances(
         &mut self,
         target_voxel_gpu_context: &VoxelGpuContext,
         knn_search_gpu_context: &KnnSearchGpuContext,
-        normals_params: NormalParams,
-    ) -> Result<Vec<[f32; 3]>> {
+    ) -> Result<Vec<[f32; 9]>> {
         let device = &self.vulkan_context.device;
         let queue = &self.vulkan_context.queue;
         let memory_allocator = &self.vulkan_context.memory_allocator;
@@ -117,6 +113,9 @@ impl NormalsGpuContext {
         let compute_pipeline = &self.compute_pipeline_search;
 
         let target_pts_num = target_voxel_gpu_context.h_downsampled_pts_num;
+        let covariance_params = CovarianceParams {
+            num_points: target_pts_num as u32,
+        };
 
         if self.current_capacity_pts < target_pts_num {
             debug!("Reallocating buffers for {} points", target_pts_num);
@@ -124,7 +123,7 @@ impl NormalsGpuContext {
             let new_capacity = (target_pts_num as f32 * 1.5) as usize;
             self.current_capacity_pts = new_capacity;
 
-            self.d_buf_normals = Some(Buffer::new_slice::<f32>(
+            self.d_buf_covariances = Some(Buffer::new_slice::<f32>(
                 memory_allocator.clone(),
                 BufferCreateInfo {
                     usage: BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC,
@@ -134,10 +133,10 @@ impl NormalsGpuContext {
                     memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
                     ..Default::default()
                 },
-                (new_capacity * 3) as u64,
+                (new_capacity * 9) as u64,
             )?);
 
-            self.staging_buf_normals = Some(Buffer::new_slice::<f32>(
+            self.staging_buf_covariances = Some(Buffer::new_slice::<f32>(
                 memory_allocator.clone(),
                 BufferCreateInfo {
                     usage: BufferUsage::TRANSFER_DST,
@@ -148,7 +147,7 @@ impl NormalsGpuContext {
                         | MemoryTypeFilter::HOST_RANDOM_ACCESS,
                     ..Default::default()
                 },
-                (new_capacity * 3) as u64,
+                (new_capacity * 9) as u64,
             )?);
         }
 
@@ -174,15 +173,15 @@ impl NormalsGpuContext {
                 ),
                 vulkano::descriptor_set::WriteDescriptorSet::buffer(
                     2,
-                    self.d_buf_normals
+                    self.d_buf_covariances
                         .as_ref()
-                        .context("Failed to get normals buffer")?
+                        .context("Failed to get covariances buffer")?
                         .clone(),
                 ),
             ],
             [],
         )
-        .context("Failed to create descriptor set for compute normals")?;
+        .context("Failed to create descriptor set for compute covariances")?;
 
         let mut command_buffer_builder = AutoCommandBufferBuilder::primary(
             command_buffer_allocator.clone(),
@@ -199,7 +198,7 @@ impl NormalsGpuContext {
             command_buffer_builder
                 .bind_pipeline_compute(compute_pipeline.clone())
                 .context("Failed to bind compute pipeline")?
-                .push_constants(pipeline_layout.clone(), 0, normals_params)
+                .push_constants(pipeline_layout.clone(), 0, covariance_params)
                 .context("Failed to push constants")?
                 .bind_descriptor_sets(
                     vulkano::pipeline::PipelineBindPoint::Compute,
@@ -212,26 +211,26 @@ impl NormalsGpuContext {
                 .context("Failed to dispatch compute shader")?;
         }
 
-        // <!--- Copy target normals from GPU to staging buffer --->
-        let copy_output_normals_src = self
-            .d_buf_normals
+        // <!--- Copy target covariances from GPU to staging buffer --->
+        let copy_output_covariances_src = self
+            .d_buf_covariances
             .as_ref()
-            .context("Failed to get output normals buffer for copy")?
+            .context("Failed to get output covariances buffer for copy")?
             .clone()
-            .slice(0..(target_pts_num * 3) as u64);
-        let copy_output_normals_dst = self
-            .staging_buf_normals
+            .slice(0..(target_pts_num * 9) as u64);
+        let copy_output_covariances_dst = self
+            .staging_buf_covariances
             .as_ref()
-            .context("Failed to get staging buffer for normals copy")?
+            .context("Failed to get staging buffer for covariances copy")?
             .clone()
-            .slice(0..(target_pts_num * 3) as u64);
+            .slice(0..(target_pts_num * 9) as u64);
         command_buffer_builder
             .copy_buffer(CopyBufferInfo::buffers(
-                copy_output_normals_src,
-                copy_output_normals_dst,
+                copy_output_covariances_src,
+                copy_output_covariances_dst,
             ))
-            .context("Failed to copy output normals to staging buffer")?;
-        // <!--- Copy target normals from GPU to staging buffer --->
+            .context("Failed to copy output covariances to staging buffer")?;
+        // <!--- Copy target covariances from GPU to staging buffer --->
 
         let command_buffer = command_buffer_builder.build()?;
 
@@ -244,24 +243,24 @@ impl NormalsGpuContext {
 
         let compute_end_time = compute_start_time.elapsed();
         debug!(
-            "Compute normals shader execution time: {:?}",
+            "Compute covariance shader execution time: {:?}",
             compute_end_time
         );
 
         // <!--- Copy results from staging buffer to CPU --->
-        let normals_content = self
-            .staging_buf_normals
+        let covariances_content = self
+            .staging_buf_covariances
             .as_ref()
-            .context("Failed to get staging buffer for normals read")?
+            .context("Failed to get staging buffer for covariances read")?
             .read()?;
-        let output_normals: Vec<[f32; 3]> = normals_content
-            .chunks_exact(3)
+        let output_covariances: Vec<[f32; 9]> = covariances_content
+            .chunks_exact(9)
             .take(target_pts_num as usize)
-            .map(|c| [c[0], c[1], c[2]])
+            .map(|c| [c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8]])
             .collect();
         // <!--- Copy results from staging buffer to CPU --->
 
-        Ok(output_normals)
+        Ok(output_covariances)
     }
 }
 

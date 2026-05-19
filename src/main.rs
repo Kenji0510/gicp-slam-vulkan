@@ -1,15 +1,18 @@
 use anyhow::{Context, Result};
 use gicp_slam_vulkan::{
     convert_type::{
-        convert_pcd_to_xyz, convert_point3_to_vec, convert_vec_to_xyz, convert_xyz_to_vec,
+        convert_pcd_to_xyz, convert_point3_to_vec, convert_vec_point_cov_to_pcd_xyzcov,
+        convert_vec_to_xyz, convert_xyz_to_vec,
     },
     deskew_points::deskew_points,
     file_handler::{
-        load_imu_data, load_pcd_files, load_pcd_xyzit, save_pcd_xyzit, save_pcd_xyznormal,
+        load_imu_data, load_pcd_files, load_pcd_xyzit, save_pcd_xyzcov, save_pcd_xyzit,
+        save_pcd_xyznormal,
     },
+    gpu_covariances::{self, combine_pts_with_normals},
     gpu_knn_search,
-    gpu_normals::{self, NormalParams, combine_pts_with_normals},
     gpu_transfer_data::GpuTransferDataContext,
+    gpu_transform,
     gpu_voxel::VoxelGpuContext,
     init_gpu::VulkanContext,
     predict_pose_by_imu::{align_imu_timestamps, build_rotation_trajectory, predict_pose_by_imu},
@@ -48,7 +51,10 @@ fn main() -> Result<()> {
         .context("Failed to create GPU transfer context")?;
     let mut voxel_gpu_context = VoxelGpuContext::new(vulkan_context.clone())?;
     let mut knn_gpu_context = gpu_knn_search::KnnSearchGpuContext::new(vulkan_context.clone())?;
-    let mut normals_gpu_context = gpu_normals::NormalsGpuContext::new(vulkan_context.clone())?;
+    let mut covariances_gpu_context =
+        gpu_covariances::CovarianceGpuContext::new(vulkan_context.clone())?;
+    let mut transform_gpu_context =
+        gpu_transform::TransformGpuContext::new(vulkan_context.clone())?;
     // --- Initialize Vulkan context ---
 
     let pcd_dir = format!("{}/pcd", LOAD_DIR);
@@ -162,25 +168,42 @@ fn main() -> Result<()> {
         // --- Compute covariance for each point ---
         knn_gpu_context.knn_search_neighbors(&voxel_gpu_context)?;
 
-        let normal_params = NormalParams {
-            num_points: voxel_gpu_context.h_downsampled_pts_num as u32,
-            vp_x: 0.0,
-            vp_y: 0.0,
-            vp_z: 0.0,
-        };
-        let normals = normals_gpu_context.compute_normals(
-            &voxel_gpu_context,
-            &knn_gpu_context,
-            normal_params,
-        )?;
+        let covariances =
+            covariances_gpu_context.compute_covariances(&voxel_gpu_context, &knn_gpu_context)?;
 
         // --- Debug ---
-        let pcd_xyznormals = combine_pts_with_normals(&downsampled_points_vec, &normals)?;
-        let save_path = format!("{}/debug/pcd_with_normals_{:04}.pcd", SAVE_DIR, i);
+        // let pcd_xyznormals = combine_pts_with_normals(&downsampled_points_vec, &normals)?;
+        // let pcd_xyzcov =
+        //     convert_vec_point_cov_to_pcd_xyzcov(&downsampled_points_vec, &covariances);
+        // let save_path = format!("{}/debug/pcd_with_covariances_{:04}.pcd", SAVE_DIR, i);
 
-        save_pcd_xyznormal(&pcd_xyznormals, &save_path)?;
+        // save_pcd_xyzcov(&pcd_xyzcov, &save_path)?;
         // --- Debug ---
         // --- Compute covariance for each point ---
+
+        // --- Transform the points ---
+        let m = current_transform;
+        let transform_params = gpu_transform::TransformParams {
+            r00: m[(0, 0)] as f32,
+            r01: m[(0, 1)] as f32,
+            r02: m[(0, 2)] as f32,
+            t0: m[(0, 3)] as f32,
+            r10: m[(1, 0)] as f32,
+            r11: m[(1, 1)] as f32,
+            r12: m[(1, 2)] as f32,
+            t1: m[(1, 3)] as f32,
+            r20: m[(2, 0)] as f32,
+            r21: m[(2, 1)] as f32,
+            r22: m[(2, 2)] as f32,
+            t2: m[(2, 3)] as f32,
+            num_points: voxel_gpu_context.h_downsampled_pts_num as u32,
+        };
+        transform_gpu_context.transform(
+            &voxel_gpu_context,
+            &covariances_gpu_context,
+            transform_params,
+        )?;
+        // --- Transform the points ---
     }
 
     Ok(())
