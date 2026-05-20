@@ -3,6 +3,7 @@ pub mod convert_type;
 pub mod deskew_points;
 pub mod file_handler;
 pub mod gpu_covariances;
+pub mod gpu_gicp;
 pub mod gpu_knn_search;
 pub mod gpu_search_neighbor;
 pub mod gpu_transfer_data;

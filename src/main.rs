@@ -10,6 +10,7 @@ use gicp_slam_vulkan::{
         save_pcd_xyznormal,
     },
     gpu_covariances::{self, combine_pts_with_normals},
+    gpu_gicp::{GicpGpuContext, GicpStaticBuffers},
     gpu_knn_search,
     gpu_search_neighbor::SearchGpuContext,
     gpu_transfer_data::GpuTransferDataContext,
@@ -57,6 +58,7 @@ fn main() -> Result<()> {
     let mut transform_gpu_context =
         gpu_transform::TransformGpuContext::new(vulkan_context.clone())?;
     let mut search_neighbor_gpu_context = SearchGpuContext::new(vulkan_context.clone())?;
+    let mut gicp_gpu_context = GicpGpuContext::new(vulkan_context.clone())?;
     // --- Initialize Vulkan context ---
 
     let pcd_dir = format!("{}/pcd", LOAD_DIR);
@@ -215,6 +217,39 @@ fn main() -> Result<()> {
             voxel_gpu_context.h_downsampled_pts_num,
         )?;
         // --- Search neighbor points for each point ---
+
+        // --- GICP optimization ---
+        let gicp_bufs = GicpStaticBuffers {
+            d_source_pts: transform_gpu_context
+                .d_buf_output_pts
+                .as_ref()
+                .context("Failed to get transformed source points buffer")?
+                .clone(),
+            d_source_covs: covariances_gpu_context
+                .d_buf_covariances
+                .as_ref()
+                .context("Failed to get source covariances buffer")?
+                .clone(),
+            d_target_pts: voxel_gpu_context
+                .d_buf_out_pts
+                .as_ref()
+                .context("Failed to get target points buffer")?
+                .clone(),
+            d_target_covs: covariances_gpu_context
+                .d_buf_covariances
+                .as_ref()
+                .context("Failed to get target covariances buffer")?
+                .clone(),
+        };
+
+        gicp_gpu_context.compute_gicp(
+            &gicp_bufs,
+            &search_neighbor_gpu_context,
+            voxel_gpu_context.h_downsampled_pts_num,
+            voxel_gpu_context.h_downsampled_pts_num,
+            MAX_DIST_SQ,
+        )?;
+        // --- GICP optimization ---
     }
 
     Ok(())
