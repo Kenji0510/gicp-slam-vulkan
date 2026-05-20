@@ -40,6 +40,10 @@ pub fn convert_point3_to_vec(points: &[Point3<f32>]) -> Vec<[f32; 3]> {
     points.iter().map(|p| [p.x, p.y, p.z]).collect()
 }
 
+pub fn convert_vec_to_point3(points: &[[f32; 3]]) -> Vec<Point3<f32>> {
+    points.iter().map(|p| Point3::new(p[0], p[1], p[2])).collect()
+}
+
 pub fn convert_vec_point_cov_to_pcd_xyzcov(
     points: &[[f32; 3]],
     cov: &[[f32; 9]],

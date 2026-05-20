@@ -14,7 +14,7 @@ use vulkano::{
     sync::{self, GpuFuture},
 };
 
-use crate::{gpu_transfer_data::GpuTransferDataContext, init_gpu::VulkanContext};
+use crate::{gpu_copy::GpuTransferDataContext, init_gpu::VulkanContext};
 
 #[derive(bytemuck::Pod, bytemuck::Zeroable, Clone, Copy)]
 #[repr(C)]

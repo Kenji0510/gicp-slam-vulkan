@@ -1,23 +1,23 @@
 use anyhow::{Context, Result};
 use gicp_slam_vulkan::{
     convert_type::{
-        convert_pcd_to_xyz, convert_point3_to_vec, convert_vec_point_cov_to_pcd_xyzcov,
-        convert_vec_to_xyz, convert_xyz_to_vec,
+        convert_pcd_to_xyz, convert_point3_to_vec, convert_vec_point_cov_to_pcd_xyzcov, convert_vec_to_point3, convert_vec_to_xyz, convert_xyz_to_vec
     },
     deskew_points::deskew_points,
     file_handler::{
         load_imu_data, load_pcd_files, load_pcd_xyzit, save_pcd_xyzcov, save_pcd_xyzit,
         save_pcd_xyznormal,
     },
+    gpu_copy::GpuTransferDataContext,
     gpu_covariances::{self, combine_pts_with_normals},
     gpu_gicp::{GicpGpuContext, GicpStaticBuffers},
     gpu_knn_search,
     gpu_search_neighbor::SearchGpuContext,
-    gpu_transfer_data::GpuTransferDataContext,
     gpu_transform,
     gpu_voxel::VoxelGpuContext,
     init_gpu::VulkanContext,
     predict_pose_by_imu::{align_imu_timestamps, build_rotation_trajectory, predict_pose_by_imu},
+    voxel_map::build_gicp_voxel_map,
 };
 use nalgebra::{Matrix4, Quaternion, UnitQuaternion, Vector3};
 
@@ -49,9 +49,12 @@ fn main() -> Result<()> {
 
     // --- Initialize Vulkan context ---
     let vulkan_context = VulkanContext::new().context("Failed to initialize Vulkan context")?;
-    let mut copy_gpu_context = GpuTransferDataContext::new(vulkan_context.clone())
+    let mut copy_source_gpu_context = GpuTransferDataContext::new(vulkan_context.clone())
         .context("Failed to create GPU transfer context")?;
-    let mut voxel_gpu_context = VoxelGpuContext::new(vulkan_context.clone())?;
+    let mut copy_target_gpu_context = GpuTransferDataContext::new(vulkan_context.clone())
+        .context("Failed to create GPU transfer context")?;
+    let mut source_voxel_gpu_context = VoxelGpuContext::new(vulkan_context.clone())?;
+    let mut target_voxel_gpu_context = VoxelGpuContext::new(vulkan_context.clone())?;
     let mut knn_gpu_context = gpu_knn_search::KnnSearchGpuContext::new(vulkan_context.clone())?;
     let mut covariances_gpu_context =
         gpu_covariances::CovarianceGpuContext::new(vulkan_context.clone())?;
@@ -92,7 +95,7 @@ fn main() -> Result<()> {
     let points_vec = convert_xyz_to_vec(&pcd);
 
     // --- Copy points to gpu memory ---
-    copy_gpu_context.copy_data_to_gpu(&points_vec, points_vec.len())?;
+    copy_target_gpu_context.copy_data_to_gpu(&points_vec, points_vec.len())?;
     // --- Copy points to gpu memory ---
 
     // --- Downsample for density normalization ---
@@ -100,13 +103,23 @@ fn main() -> Result<()> {
     let points_num = points_vec.len();
 
     let downsampled_points_vec =
-        voxel_gpu_context.voxelization(&copy_gpu_context, downsample_voxel_size)?;
+        target_voxel_gpu_context.voxelization(&copy_target_gpu_context, downsample_voxel_size)?;
     // let downsampled_init_points = voxel_downsample_points(&points, downsample_voxel_size);
 
     // let downsampled_pcd = convert_vec_to_xyz(&downsampled_points_vec);
     // let save_file = format!("{}/debug/downsampled_init.pcd", SAVE_DIR);
     // save_pcd_xyzit(&downsampled_pcd, &save_file)?;
     // --- Downsample for density normalization ---
+
+    // --- Build voxel map for target points ---
+    let downsampled_points = convert_vec_to_point3(&downsampled_points_vec);
+    let mut target_voxel_map = build_gicp_voxel_map(
+        &downsampled_points,
+        downsample_voxel_size,
+        MAX_POINTS_PER_VOXEL,
+        MIN_POINTS_PER_VOXEL,
+    );
+    // --- Build voxel map for target points ---
 
     let mut prev_frame_start_time = pcd
         .iter()
@@ -159,21 +172,21 @@ fn main() -> Result<()> {
         let points_vec = convert_point3_to_vec(&deskewed_points);
 
         // --- Copy points to gpu memory ---
-        copy_gpu_context.copy_data_to_gpu(&points_vec, points_vec.len())?;
+        copy_source_gpu_context.copy_data_to_gpu(&points_vec, points_vec.len())?;
         // --- Copy points to gpu memory ---
 
         // --- Downsample for density normalization ---
-        let downsampled_points_vec =
-            voxel_gpu_context.voxelization(&copy_gpu_context, downsample_voxel_size)?;
+        let downsampled_points_vec = source_voxel_gpu_context
+            .voxelization(&copy_source_gpu_context, downsample_voxel_size)?;
         // --- Downsample for density normalization ---
 
         let mut current_transform = pose_prediction.0;
 
         // --- Compute covariance for each point ---
-        knn_gpu_context.knn_search_neighbors(&voxel_gpu_context)?;
+        knn_gpu_context.knn_search_neighbors(&source_voxel_gpu_context)?;
 
-        let covariances =
-            covariances_gpu_context.compute_covariances(&voxel_gpu_context, &knn_gpu_context)?;
+        let covariances = covariances_gpu_context
+            .compute_covariances(&source_voxel_gpu_context, &knn_gpu_context)?;
 
         // --- Debug ---
         // let pcd_xyznormals = combine_pts_with_normals(&downsampled_points_vec, &normals)?;
@@ -200,10 +213,10 @@ fn main() -> Result<()> {
             r21: m[(2, 1)] as f32,
             r22: m[(2, 2)] as f32,
             t2: m[(2, 3)] as f32,
-            num_points: voxel_gpu_context.h_downsampled_pts_num as u32,
+            num_points: source_voxel_gpu_context.h_downsampled_pts_num as u32,
         };
         transform_gpu_context.transform(
-            &voxel_gpu_context,
+            &source_voxel_gpu_context,
             &covariances_gpu_context,
             transform_params,
         )?;
@@ -212,9 +225,9 @@ fn main() -> Result<()> {
         // --- Search neighbor points for each point ---
         search_neighbor_gpu_context.search_neighbor(
             &transform_gpu_context,
-            voxel_gpu_context.h_downsampled_pts_num,
-            &voxel_gpu_context,
-            voxel_gpu_context.h_downsampled_pts_num,
+            source_voxel_gpu_context.h_downsampled_pts_num,
+            &source_voxel_gpu_context,
+            source_voxel_gpu_context.h_downsampled_pts_num,
         )?;
         // --- Search neighbor points for each point ---
 
@@ -230,7 +243,7 @@ fn main() -> Result<()> {
                 .as_ref()
                 .context("Failed to get source covariances buffer")?
                 .clone(),
-            d_target_pts: voxel_gpu_context
+            d_target_pts: source_voxel_gpu_context
                 .d_buf_out_pts
                 .as_ref()
                 .context("Failed to get target points buffer")?
@@ -245,8 +258,8 @@ fn main() -> Result<()> {
         gicp_gpu_context.compute_gicp(
             &gicp_bufs,
             &search_neighbor_gpu_context,
-            voxel_gpu_context.h_downsampled_pts_num,
-            voxel_gpu_context.h_downsampled_pts_num,
+            source_voxel_gpu_context.h_downsampled_pts_num,
+            source_voxel_gpu_context.h_downsampled_pts_num,
             MAX_DIST_SQ,
         )?;
         // --- GICP optimization ---
