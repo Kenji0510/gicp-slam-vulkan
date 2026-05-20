@@ -11,6 +11,7 @@ use gicp_slam_vulkan::{
     },
     gpu_covariances::{self, combine_pts_with_normals},
     gpu_knn_search,
+    gpu_search_neighbor::SearchGpuContext,
     gpu_transfer_data::GpuTransferDataContext,
     gpu_transform,
     gpu_voxel::VoxelGpuContext,
@@ -55,6 +56,7 @@ fn main() -> Result<()> {
         gpu_covariances::CovarianceGpuContext::new(vulkan_context.clone())?;
     let mut transform_gpu_context =
         gpu_transform::TransformGpuContext::new(vulkan_context.clone())?;
+    let mut search_neighbor_gpu_context = SearchGpuContext::new(vulkan_context.clone())?;
     // --- Initialize Vulkan context ---
 
     let pcd_dir = format!("{}/pcd", LOAD_DIR);
@@ -204,6 +206,15 @@ fn main() -> Result<()> {
             transform_params,
         )?;
         // --- Transform the points ---
+
+        // --- Search neighbor points for each point ---
+        search_neighbor_gpu_context.search_neighbor(
+            &transform_gpu_context,
+            voxel_gpu_context.h_downsampled_pts_num,
+            &voxel_gpu_context,
+            voxel_gpu_context.h_downsampled_pts_num,
+        )?;
+        // --- Search neighbor points for each point ---
     }
 
     Ok(())

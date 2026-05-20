@@ -4,6 +4,7 @@ pub mod deskew_points;
 pub mod file_handler;
 pub mod gpu_covariances;
 pub mod gpu_knn_search;
+pub mod gpu_search_neighbor;
 pub mod gpu_transfer_data;
 pub mod gpu_transform;
 pub mod gpu_voxel;
