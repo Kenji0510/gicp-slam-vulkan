@@ -294,6 +294,13 @@ impl LocalMap {
         }
     }
 
+    pub fn get_all_points(&self) -> Vec<Point3<f32>> {
+        self.voxel_map
+            .values()
+            .flat_map(|cell| cell.points.iter().map(|(p, _)| *p))
+            .collect()
+    }
+
     /// ワールド座標系に変換済みの点群を 1 フレームとして挿入する。
     /// `origin` は当該フレームのセンサー原点（距離ベース追い出しに使用）。
     pub fn insert_frame(&mut self, points: &[Point3<f32>], origin: Point3<f32>) {
@@ -423,5 +430,3 @@ impl LocalMap {
         result
     }
 }
-
-

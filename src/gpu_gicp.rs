@@ -3,6 +3,7 @@ use std::{sync::Arc, time::Instant};
 use anyhow::{Context, Result};
 
 use log::debug;
+use nalgebra::{Matrix4, Matrix6, UnitQuaternion, Vector3, Vector6};
 use vulkano::{
     buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer},
     command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferInfo},
@@ -362,4 +363,30 @@ impl GicpGpuContext {
 
         Ok((output_h, output_b))
     }
+}
+
+pub fn solve_gicp(system: (Matrix6<f32>, Vector6<f32>), damping: f32) -> Option<Matrix4<f64>> {
+    let (mut h, b) = system;
+    for i in 0..6 {
+        h[(i, i)] += damping;
+    }
+
+    let delta = h.lu().solve(&b)?;
+
+    let rot_vec = Vector3::new(delta[0], delta[1], delta[2]);
+    let trans_vec = Vector3::new(delta[3], delta[4], delta[5]);
+
+    let angle = rot_vec.norm();
+    let rotation = if angle < 1.0e-10 {
+        UnitQuaternion::identity()
+    } else {
+        UnitQuaternion::from_axis_angle(&nalgebra::Unit::new_normalize(rot_vec), angle)
+    };
+
+    let mut mat = rotation.to_homogeneous().cast::<f64>();
+    mat[(0, 3)] = trans_vec.x as f64;
+    mat[(1, 3)] = trans_vec.y as f64;
+    mat[(2, 3)] = trans_vec.z as f64;
+
+    Some(mat)
 }
