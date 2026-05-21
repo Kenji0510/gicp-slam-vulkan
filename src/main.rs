@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use anyhow::{Context, Result};
 use gicp_slam_vulkan::{
     convert_type::{
@@ -17,6 +19,7 @@ use gicp_slam_vulkan::{
     gpu_transform,
     gpu_voxel::VoxelGpuContext,
     init_gpu::VulkanContext,
+    log_performance::PerformanceLogs,
     predict_pose_by_imu::{align_imu_timestamps, build_rotation_trajectory, predict_pose_by_imu},
     voxel_map::{LocalMap, LocalMapConfig},
 };
@@ -34,7 +37,7 @@ const MAX_DIST: f32 = 45.0;
 const MAX_POINTS_PER_VOXEL: usize = 10;
 const MIN_POINTS_PER_VOXEL: usize = 3;
 
-const LOCAL_MAP_MAX_FRAMES: usize = 50;
+const LOCAL_MAP_MAX_FRAMES: usize = 25;
 const LOCAL_MAP_MAX_DISTANCE: f32 = 20.0;
 
 const SEARCH_RANGE: i32 = 3; // Range of 5x5x5 voxels
@@ -50,6 +53,23 @@ const IMU_TO_LIDAR_QUAT_W: f64 = 0.00097028;
 
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
+
+    let mut performance_logs = PerformanceLogs {
+        voxelization_time_ms: Vec::new(),
+        // pub covariance_time_ms: f32,
+        create_voxel_map_time_ms: Vec::new(),
+        knn_search_time_ms: Vec::new(),
+        compute_covariances_time_ms: Vec::new(),
+        transform_points_time_ms: Vec::new(),
+        find_neighbors_time_ms: Vec::new(),
+        each_gicp_time_ms: Vec::new(),
+        total_gicp_time_ms: Vec::new(),
+        query_voxel_time_ms: Vec::new(),
+        update_voxel_map_time_ms: Vec::new(),
+        merge_time_ms: Vec::new(),
+        total_average_time_ms: Vec::new(),
+        iteration_count: 0,
+    };
 
     // --- Initialize Vulkan context ---
     let vulkan_context = VulkanContext::new().context("Failed to initialize Vulkan context")?;
@@ -126,7 +146,7 @@ fn main() -> Result<()> {
         voxel_size: downsample_voxel_size,
         max_points_per_voxel: MAX_POINTS_PER_VOXEL,
         min_points_per_voxel: MIN_POINTS_PER_VOXEL,
-        max_frames: usize::MAX, // No limit on frames for global map
+        max_frames: usize::MAX,      // No limit on frames for global map
         max_distance: f32::INFINITY, // No distance-based eviction for global map
     });
     global_voxel_map.insert_frame(&downsampled_points, Point3::origin());
@@ -148,6 +168,7 @@ fn main() -> Result<()> {
 
     for (i, pcd_path) in pcd_files.iter().enumerate().skip(1) {
         log::info!("Processing frame {}: {}", i, pcd_path.to_string_lossy());
+        performance_logs.iteration_count += 1;
 
         let source_pcd = load_pcd_xyzit(&pcd_path.to_string_lossy())?;
 
@@ -190,10 +211,20 @@ fn main() -> Result<()> {
         // --- Deskew source pcd ---
 
         // --- Create local map ---
+        let start = Instant::now();
         let t = pose_prediction.0.column(3);
         let sensor_origin_global = Point3::new(t[0] as f32, t[1] as f32, t[2] as f32);
         let local_map = local_voxel_map
             .query_points_within_radius(&sensor_origin_global, LOCAL_MAP_MAX_DISTANCE);
+        let duration = start.elapsed();
+        performance_logs
+            .create_voxel_map_time_ms
+            .push(duration.as_secs_f32() * 1000.0);
+        log::debug!(
+            "Created local map with {} points in {:.2} ms",
+            local_map.len(),
+            performance_logs.create_voxel_map_time_ms.last().unwrap()
+        );
         // --- Create local map ---
 
         let points_vec = convert_point3_to_vec(&deskewed_points);
@@ -206,22 +237,49 @@ fn main() -> Result<()> {
         // --- Copy points to gpu memory ---
 
         // --- Downsample for density normalization ---
+        let start = Instant::now();
         let downsampled_source_points_vec = source_voxel_gpu_context
             .voxelization(&copy_source_gpu_context, downsample_voxel_size)?;
         let downsampled_local_map_points_vec = target_voxel_gpu_context
             .voxelization(&copy_target_gpu_context, downsample_voxel_size)?;
+        let duration = start.elapsed();
+        performance_logs
+            .voxelization_time_ms
+            .push(duration.as_secs_f32() * 1000.0);
+        log::debug!(
+            "Voxelization time: {:.2} ms",
+            performance_logs.voxelization_time_ms.last().unwrap()
+        );
         // --- Downsample for density normalization ---
 
         let mut current_transform = pose_prediction.0;
 
         // --- Compute covariance for each point ---
+        let start = Instant::now();
         source_knn_gpu_context.knn_search_neighbors(&source_voxel_gpu_context)?;
         target_knn_gpu_context.knn_search_neighbors(&target_voxel_gpu_context)?;
+        let duration = start.elapsed();
+        performance_logs
+            .knn_search_time_ms
+            .push(duration.as_secs_f32() * 1000.0);
+        log::debug!(
+            "KNN search completed in {:.2} ms",
+            performance_logs.knn_search_time_ms.last().unwrap()
+        );
 
+        let start = Instant::now();
         let source_covariances = source_covariances_gpu_context
             .compute_covariances(&source_voxel_gpu_context, &source_knn_gpu_context)?;
         let target_covariances = target_covariances_gpu_context
             .compute_covariances(&target_voxel_gpu_context, &target_knn_gpu_context)?;
+        let duration = start.elapsed();
+        performance_logs
+            .compute_covariances_time_ms
+            .push(duration.as_secs_f32() * 1000.0);
+        log::debug!(
+            "Covariance computation completed in {:.2} ms",
+            performance_logs.compute_covariances_time_ms.last().unwrap()
+        );
 
         // --- Debug ---
         // let pcd_xyznormals = combine_pts_with_normals(&downsampled_points_vec, &normals)?;
@@ -234,6 +292,7 @@ fn main() -> Result<()> {
         // --- Compute covariance for each point ---
 
         // --- GICP optimization iterations ---
+        let gicp_start = Instant::now();
         for i in 0..GICP_ITERATIONS {
             log::info!("GICP iteration {}/{}", i + 1, GICP_ITERATIONS);
 
@@ -255,20 +314,38 @@ fn main() -> Result<()> {
             };
 
             // --- Transform the points ---
+            let start_transform = Instant::now();
             transform_gpu_context.transform(
                 &source_voxel_gpu_context,
                 &source_covariances_gpu_context,
                 transform_params,
             )?;
+            let duration_transform = start_transform.elapsed();
+            performance_logs
+                .transform_points_time_ms
+                .push(duration_transform.as_secs_f32() * 1000.0);
+            log::debug!(
+                "Point transformation completed in {:.2} ms",
+                performance_logs.transform_points_time_ms.last().unwrap()
+            );
             // --- Transform the points ---
 
             // --- Search neighbor points for each point ---
+            let start_search_neighbor = Instant::now();
             search_neighbor_gpu_context.search_neighbor(
                 &transform_gpu_context,
                 source_voxel_gpu_context.h_downsampled_pts_num,
                 &target_voxel_gpu_context,
                 target_voxel_gpu_context.h_downsampled_pts_num,
             )?;
+            let duration_search_neighbor = start_search_neighbor.elapsed();
+            performance_logs
+                .find_neighbors_time_ms
+                .push(duration_search_neighbor.as_secs_f32() * 1000.0);
+            log::debug!(
+                "Neighbor search completed in {:.2} ms",
+                performance_logs.find_neighbors_time_ms.last().unwrap()
+            );
             // --- Search neighbor points for each point ---
 
             // --- GICP optimization ---
@@ -295,6 +372,7 @@ fn main() -> Result<()> {
                     .clone(),
             };
 
+            let gicp_iteration_start = Instant::now();
             let (h_vec, b_vec) = gicp_gpu_context.compute_gicp(
                 &gicp_bufs,
                 &search_neighbor_gpu_context,
@@ -302,6 +380,15 @@ fn main() -> Result<()> {
                 target_voxel_gpu_context.h_downsampled_pts_num,
                 MAX_DIST_SQ,
             )?;
+            let gicp_iteration_duration = gicp_iteration_start.elapsed();
+            performance_logs
+                .each_gicp_time_ms
+                .push(gicp_iteration_duration.as_secs_f32() * 1000.0);
+            log::debug!(
+                "GICP iteration {} completed in {:.2} ms",
+                i + 1,
+                performance_logs.each_gicp_time_ms.last().unwrap()
+            );
 
             let h = nalgebra::Matrix6::from_row_slice(&h_vec);
             let b = nalgebra::Vector6::from_row_slice(&b_vec);
@@ -310,6 +397,14 @@ fn main() -> Result<()> {
             }
             // --- GICP optimization ---
         }
+        let gicp_duration = gicp_start.elapsed();
+        performance_logs
+            .total_gicp_time_ms
+            .push(gicp_duration.as_secs_f32() * 1000.0);
+        log::debug!(
+            "Total GICP optimization completed in {:.2} ms",
+            performance_logs.total_gicp_time_ms.last().unwrap()
+        );
         // --- GICP optimization iterations ---
 
         // --- Update local map ---
@@ -332,8 +427,17 @@ fn main() -> Result<()> {
             p.coords = rotated;
         }
 
+        let start_update_voxel_map = Instant::now();
         local_voxel_map.insert_frame(&downsampled_source_points, origin);
         global_voxel_map.insert_frame(&downsampled_source_points, origin);
+        let duration_update_voxel_map = start_update_voxel_map.elapsed();
+        performance_logs
+            .update_voxel_map_time_ms
+            .push(duration_update_voxel_map.as_secs_f32() * 1000.0);
+        log::debug!(
+            "Local map updated in {:.2} ms",
+            performance_logs.update_voxel_map_time_ms.last().unwrap()
+        );
         // --- Update local map ---
 
         let prev_pos = current_global_pose.fixed_view::<3, 1>(0, 3).into_owned();
@@ -344,11 +448,49 @@ fn main() -> Result<()> {
         prev_frame_start_time = current_frame_start_time; // 次フレームのIMU積分の開始時刻を更新
     }
 
+    // --- Save logs ---
+    let log_save_path = format!("{}/performance_logs.json", SAVE_DIR);
+    let log_file = std::fs::File::create(&log_save_path)?;
+    serde_json::to_writer_pretty(log_file, &performance_logs)?;
+    log::info!("Performance logs saved to {}", log_save_path);
+    // --- Save logs ---
+
+    // --- Print performance statistics ---
+    let avg = |v: &Vec<f32>| -> f32 {
+        if v.is_empty() { 0.0 } else { v.iter().sum::<f32>() / v.len() as f32 }
+    };
+    let n = performance_logs.iteration_count;
+    let each_gicp_avg = avg(&performance_logs.each_gicp_time_ms);
+    // each_gicp_time_ms は GICP_ITERATIONS 分のエントリが含まれるので 1イテレーションあたりに換算
+    let each_gicp_per_iter = if n > 0 {
+        performance_logs.each_gicp_time_ms.iter().sum::<f32>() / n as f32
+    } else { 0.0 };
+
+    log::info!("===== Performance Statistics ({} frames) =====", n);
+    log::info!("  Query local map        : {:>8.2} ms/frame", avg(&performance_logs.create_voxel_map_time_ms));
+    log::info!("  Voxelization           : {:>8.2} ms/frame", avg(&performance_logs.voxelization_time_ms));
+    log::info!("  KNN search             : {:>8.2} ms/frame", avg(&performance_logs.knn_search_time_ms));
+    log::info!("  Covariance computation : {:>8.2} ms/frame", avg(&performance_logs.compute_covariances_time_ms));
+    log::info!("  Point transform        : {:>8.2} ms/call ",  avg(&performance_logs.transform_points_time_ms));
+    log::info!("  Neighbor search        : {:>8.2} ms/call ",  avg(&performance_logs.find_neighbors_time_ms));
+    log::info!("  GICP solve (per call)  : {:>8.2} ms/call ",  each_gicp_avg);
+    log::info!("  GICP total             : {:>8.2} ms/frame", avg(&performance_logs.total_gicp_time_ms));
+    log::info!("  Map update             : {:>8.2} ms/frame", avg(&performance_logs.update_voxel_map_time_ms));
+    log::info!("================================================");
+
+    // --- Debug ---
+
+    // --- Debug ---
+
     // --- Save final local map for visualization ---
     let final_global_map_points_vec = convert_point3_to_vec(&global_voxel_map.get_all_points());
     // let final_local_map_points = convert_vec_to_point3(&final_local_map_points_vec);
     let save_path = format!("{}/final_global_map.pcd", SAVE_DIR);
-    save_pcd_xyzit(&convert_vec_to_xyz(&final_global_map_points_vec), &save_path)?;
+    save_pcd_xyzit(
+        &convert_vec_to_xyz(&final_global_map_points_vec),
+        &save_path,
+    )?;
+    // --- Save final local map for visualization ---
 
     Ok(())
 }

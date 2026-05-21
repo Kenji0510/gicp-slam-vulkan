@@ -24,3 +24,4 @@ foldhash = "0.1"
 
 rayon = "1.12.0"
 rustc-hash = "2.1.2"
+plotters = "0.3.7"
