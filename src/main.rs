@@ -17,9 +17,9 @@ use gicp_slam_vulkan::{
     gpu_voxel::VoxelGpuContext,
     init_gpu::VulkanContext,
     predict_pose_by_imu::{align_imu_timestamps, build_rotation_trajectory, predict_pose_by_imu},
-    voxel_map::build_gicp_voxel_map,
+    voxel_map::{LocalMap, LocalMapConfig},
 };
-use nalgebra::{Matrix4, Quaternion, UnitQuaternion, Vector3};
+use nalgebra::{Matrix4, Point3, Quaternion, UnitQuaternion, Vector3};
 
 const LOAD_DIR: &str = "data/input/05172026/park01";
 const SAVE_DIR: &str = "data/output/05182026/park01";
@@ -32,6 +32,9 @@ const MAX_DIST: f32 = 45.0;
 
 const MAX_POINTS_PER_VOXEL: usize = 10;
 const MIN_POINTS_PER_VOXEL: usize = 3;
+
+const LOCAL_MAP_MAX_FRAMES: usize = 50;
+const LOCAL_MAP_MAX_DISTANCE: f32 = 20.0;
 
 const SEARCH_RANGE: i32 = 3; // Range of 5x5x5 voxels
 const MAX_DIST_SQ: f32 = 1.0; // Optional maximum distance squared
@@ -111,15 +114,17 @@ fn main() -> Result<()> {
     // save_pcd_xyzit(&downsampled_pcd, &save_file)?;
     // --- Downsample for density normalization ---
 
-    // --- Build voxel map for target points ---
+    // --- Build local voxel map (sliding window) ---
     let downsampled_points = convert_vec_to_point3(&downsampled_points_vec);
-    let mut target_voxel_map = build_gicp_voxel_map(
-        &downsampled_points,
-        downsample_voxel_size,
-        MAX_POINTS_PER_VOXEL,
-        MIN_POINTS_PER_VOXEL,
-    );
-    // --- Build voxel map for target points ---
+    let mut local_voxel_map = LocalMap::new(LocalMapConfig {
+        voxel_size: downsample_voxel_size,
+        max_points_per_voxel: MAX_POINTS_PER_VOXEL,
+        min_points_per_voxel: MIN_POINTS_PER_VOXEL,
+        max_frames: LOCAL_MAP_MAX_FRAMES,
+        max_distance: LOCAL_MAP_MAX_DISTANCE,
+    });
+    local_voxel_map.insert_frame(&downsampled_points, Point3::origin());
+    // --- Build local voxel map (sliding window) ---
 
     let mut prev_frame_start_time = pcd
         .iter()
@@ -168,6 +173,8 @@ fn main() -> Result<()> {
             MAX_DIST,
         );
         // --- Deskew source pcd ---
+
+        let local_map = local_voxel_map.query_points_within_radius(&deskewed_points[0], LOCAL_MAP_MAX_DISTANCE);
 
         let points_vec = convert_point3_to_vec(&deskewed_points);
 

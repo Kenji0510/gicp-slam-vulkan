@@ -357,6 +357,7 @@ dependencies = [
  "pcd-rs",
  "rayon",
  "regex",
+ "rustc-hash",
  "serde",
  "serde_json",
  "vulkano 0.35.2",
@@ -1021,6 +1022,12 @@ checksum = "921904a62e410e37e215c40381b7117f830d9d89ba60ab5236170541dd25646b"
 dependencies = [
  "xmlparser",
 ]
+
+[[package]]
+name = "rustc-hash"
+version = "2.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94300abf3f1ae2e2b8ffb7b58043de3d399c73fa6f4b73826402a5c457614dbe"
 
 [[package]]
 name = "rustix"

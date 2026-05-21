@@ -1,4 +1,6 @@
-use nalgebra::{Isometry3, Matrix3, Matrix4, Point3, SymmetricEigen, Vector3};
+use std::collections::VecDeque;
+
+use nalgebra::{Matrix3, Point3, Vector3};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -18,7 +20,8 @@ pub struct VoxelCell {
     /// このvoxel内に入った代表点。
     /// 初期段階ではデバッグ性を優先して保持する。
     /// 将来的には Welford の count / mean / m2 のみへ移行可能。
-    pub points: Vec<Point3<f32>>,
+    /// タプルの 2 要素目はフレーム ID。
+    pub points: Vec<(Point3<f32>, u64)>,
 
     /// Gaussianの平均 μ。
     pub mean: Point3<f32>,
@@ -55,17 +58,25 @@ impl VoxelCell {
         self.points.len()
     }
 
-    pub fn push_point(&mut self, p: Point3<f32>, max_points_per_gaussian: usize) -> bool {
+    pub fn push_point(
+        &mut self,
+        p: Point3<f32>,
+        frame_id: u64,
+        max_points_per_gaussian: usize,
+    ) -> bool {
         if self.points.len() >= max_points_per_gaussian {
             return false;
         }
-
-        self.points.push(p);
+        self.points.push((p, frame_id));
         true
     }
 
     pub fn compute_average(&self) -> Point3<f32> {
-        compute_mean_from_points(&self.points)
+        let mut sum = Vector3::zeros();
+        for (p, _) in &self.points {
+            sum += p.coords;
+        }
+        Point3::from(sum / self.points.len() as f32)
     }
 
     pub fn compute_covariance(cell: &VoxelCell) {}
@@ -133,16 +144,6 @@ pub fn invert_matrix3_safe(m: Matrix3<f32>) -> Option<Matrix3<f32>> {
     }
 
     m.try_inverse()
-}
-
-fn compute_mean_from_points(points: &[Point3<f32>]) -> Point3<f32> {
-    let mut sum = Vector3::zeros();
-
-    for p in points {
-        sum += p.coords;
-    }
-
-    Point3::from(sum / points.len() as f32)
 }
 
 fn neighbor_keys(key: &VoxelKey) -> impl IntoIterator<Item = VoxelKey> {
@@ -219,7 +220,7 @@ pub fn build_gicp_voxel_map(
     for &p in points {
         let key = voxel_key(&p, gicp_voxel_size);
         let cell = voxel_map.entry(key).or_insert_with(VoxelCell::new);
-        cell.push_point(p, max_points_per_voxel);
+        cell.push_point(p, 0, max_points_per_voxel);
     }
 
     // Mean (parallel)
@@ -256,147 +257,171 @@ pub fn build_gicp_voxel_map(
     voxel_map
 }
 
-pub fn recompute_all_covariance(voxel_map: &mut VoxelMap, min_points_per_gaussian: usize) {
-    voxel_map.par_iter_mut().for_each(|(_, cell)| {
-        cell.recompute_covariance(min_points_per_gaussian);
-    });
+// ---------------------------------------------------------------------------
+// LocalMap: フレームスタンプ付きスライディングウィンドウ管理
+// ---------------------------------------------------------------------------
+
+pub struct LocalMapConfig {
+    pub voxel_size: f32,
+    pub max_points_per_voxel: usize,
+    pub min_points_per_voxel: usize,
+    /// フレーム数ベースの追い出し上限。
+    pub max_frames: usize,
+    /// 距離ベースの追い出し上限 [m]。
+    pub max_distance: f32,
 }
 
-pub fn recompute_gaussians_for_keys(
-    voxel_map: &mut VoxelMap,
-    keys: &[VoxelKey],
-    min_points_per_gaussian: usize,
-    min_variance: f32,
-    max_variance: f32,
-    information_regularization: f32,
-) {
-    let results: Vec<(VoxelKey, VoxelCell)> = keys
-        .par_iter()
-        .filter_map(|&key| {
-            let mut cell = voxel_map.get(&key)?.clone();
-            cell.recompute_covariance(min_points_per_gaussian);
-            Some((key, cell))
-        })
-        .collect();
-
-    for (key, cell) in results {
-        if let Some(dst) = voxel_map.get_mut(&key) {
-            *dst = cell;
-        }
-    }
+struct FrameEntry {
+    frame_id: u64,
+    origin: Point3<f32>,
+    dirty_keys: FxHashSet<VoxelKey>,
 }
 
-/// VoxelMap に剛体変換を適用して新しい VoxelMap を返す。
-/// - mean:       R * p + t
-/// - covariance: R * Σ * R^T
-/// - points:     R * p + t (各点)
-/// voxel_key はtransform後の mean から再計算する。
-pub fn transform_voxel_map(map: &VoxelMap, pose: &Matrix4<f64>, voxel_size: f32) -> VoxelMap {
-    let rot = pose.fixed_view::<3, 3>(0, 0).into_owned().cast::<f32>();
-    let trans: Vector3<f32> = pose.fixed_view::<3, 1>(0, 3).into_owned().cast::<f32>();
-
-    map.par_iter()
-        .map(|(_, cell)| {
-            let new_mean = Point3::from(rot * cell.mean.coords + trans);
-            let new_covariance = rot * cell.covariance * rot.transpose();
-            let new_raw_covariance = rot * cell.raw_covariance * rot.transpose();
-            let new_key = voxel_key(&new_mean, voxel_size);
-            (
-                new_key,
-                VoxelCell {
-                    points: Vec::new(),
-                    mean: new_mean,
-                    raw_covariance: new_raw_covariance,
-                    covariance: new_covariance,
-                    valid: cell.valid,
-                    voxel_key: new_key,
-                },
-            )
-        })
-        .collect()
+pub struct LocalMap {
+    pub voxel_map: VoxelMap,
+    frame_index: VecDeque<FrameEntry>,
+    config: LocalMapConfig,
+    next_frame_id: u64,
 }
 
-/// 変換済み点群を既存のGaussian voxel mapに追加する。
-///
-/// Gaussian版では「1 voxel = 1 Gaussian」なので、GICP版のように周辺3x3x3を
-/// 再計算しない。変更されたvoxel自身だけを再計算する。
-pub fn merge_points_into_gaussian_voxel_map(
-    map: &mut VoxelMap,
-    points: &[Point3<f32>],
-    pose: &Matrix4<f64>,
-    gicp_voxel_size: f32,
-    max_points_per_voxel: usize,
-    min_points_per_voxel: usize,
-) {
-    let rot = pose.fixed_view::<3, 3>(0, 0).into_owned().cast::<f32>();
-    let trans: Vector3<f32> = pose.fixed_view::<3, 1>(0, 3).into_owned().cast::<f32>();
-
-    let mut modified_keys = FxHashSet::<VoxelKey>::default();
-
-    for p in points {
-        let transformed = Point3::from(rot * p.coords + trans);
-        let key = voxel_key(&transformed, gicp_voxel_size);
-        let cell = map.entry(key).or_insert_with(VoxelCell::new);
-
-        if cell.push_point(transformed, max_points_per_voxel) {
-            modified_keys.insert(key);
+impl LocalMap {
+    pub fn new(config: LocalMapConfig) -> Self {
+        Self {
+            voxel_map: VoxelMap::default(),
+            frame_index: VecDeque::new(),
+            config,
+            next_frame_id: 0,
         }
     }
 
-    if modified_keys.is_empty() {
-        return;
-    }
+    /// ワールド座標系に変換済みの点群を 1 フレームとして挿入する。
+    /// `origin` は当該フレームのセンサー原点（距離ベース追い出しに使用）。
+    pub fn insert_frame(&mut self, points: &[Point3<f32>], origin: Point3<f32>) {
+        let frame_id = self.next_frame_id;
+        self.next_frame_id += 1;
 
-    // Mean: 変更されたvoxelのみ再計算
-    for key in &modified_keys {
-        if let Some(cell) = map.get_mut(key) {
-            cell.mean = cell.compute_average();
-        }
-    }
+        let mut dirty_keys = FxHashSet::default();
 
-    // Covariance: 変更voxel + その隣接voxelのみ再計算
-    // (あるvoxelのmeanが変わると、そのvoxelを隣接に持つ全voxelの共分散も変わる)
-    let keys_to_update: FxHashSet<VoxelKey> = modified_keys
-        .iter()
-        .flat_map(|key| {
-            let mut ks: Vec<VoxelKey> = neighbor_keys(key).into_iter().collect();
-            ks.push(*key);
-            ks
-        })
-        .filter(|key| map.contains_key(key))
-        .collect();
-
-    let keys_and_neighbors: Vec<(VoxelKey, Vec<Point3<f32>>, Point3<f32>)> = keys_to_update
-        .into_iter()
-        .filter_map(|key| {
-            let cell = map.get(&key)?;
-            let mean = cell.mean;
-            let neighbor_means: Vec<Point3<f32>> = neighbor_keys(&key)
-                .into_iter()
-                .filter_map(|nk| map.get(&nk))
-                .map(|c| c.mean)
-                .collect();
-            Some((key, neighbor_means, mean))
-        })
-        .collect();
-
-    let updates: Vec<(VoxelKey, Matrix3<f32>, Matrix3<f32>)> = keys_and_neighbors
-        .par_iter()
-        .filter_map(|(key, neighbor_means, mean)| {
-            if neighbor_means.len() < min_points_per_voxel {
-                return None;
+        for &p in points {
+            let key = voxel_key(&p, self.config.voxel_size);
+            let cell = self.voxel_map.entry(key).or_insert_with(VoxelCell::new);
+            if cell.push_point(p, frame_id, self.config.max_points_per_voxel) {
+                dirty_keys.insert(key);
             }
-            let raw_cov = compute_raw_covariance_from_points(neighbor_means, mean)?;
-            let cov = regularize_gicp_covariance(raw_cov);
-            Some((*key, raw_cov, cov))
-        })
-        .collect();
+        }
 
-    for (key, raw_cov, cov) in updates {
-        if let Some(cell) = map.get_mut(&key) {
-            cell.raw_covariance = raw_cov;
-            cell.covariance = cov;
-            cell.valid = true;
+        for &key in &dirty_keys {
+            if let Some(cell) = self.voxel_map.get_mut(&key) {
+                cell.mean = cell.compute_average();
+                cell.valid = cell.points.len() >= self.config.min_points_per_voxel;
+            }
+        }
+
+        self.frame_index.push_back(FrameEntry {
+            frame_id,
+            origin,
+            dirty_keys,
+        });
+
+        self.evict_if_needed();
+    }
+
+    pub fn frame_count(&self) -> usize {
+        self.frame_index.len()
+    }
+
+    /// max_frames と max_distance の OR 条件で古いフレームを追い出す。
+    fn evict_if_needed(&mut self) {
+        loop {
+            let should_evict = match self.frame_index.front() {
+                None => break,
+                Some(front) => {
+                    if self.frame_index.len() > self.config.max_frames {
+                        true
+                    } else if let Some(back) = self.frame_index.back() {
+                        let dx = back.origin.x - front.origin.x;
+                        let dy = back.origin.y - front.origin.y;
+                        let dz = back.origin.z - front.origin.z;
+                        dx * dx + dy * dy + dz * dz
+                            > self.config.max_distance * self.config.max_distance
+                    } else {
+                        false
+                    }
+                }
+            };
+            if !should_evict {
+                break;
+            }
+            self.evict_oldest();
         }
     }
+
+    /// 最古フレームの点を voxel_map から除去し、空になった voxel を削除する。
+    fn evict_oldest(&mut self) {
+        let Some(entry) = self.frame_index.pop_front() else {
+            return;
+        };
+
+        let mut to_remove = Vec::new();
+
+        for &key in &entry.dirty_keys {
+            if let Some(cell) = self.voxel_map.get_mut(&key) {
+                cell.points.retain(|(_, fid)| *fid != entry.frame_id);
+                if cell.points.is_empty() {
+                    to_remove.push(key);
+                } else {
+                    cell.mean = cell.compute_average();
+                    cell.valid = cell.points.len() >= self.config.min_points_per_voxel;
+                }
+            }
+        }
+
+        for key in to_remove {
+            self.voxel_map.remove(&key);
+        }
+    }
+
+    /// `center` から `radius` [m] 以内の全点を収集して返す。
+    ///
+    /// voxel の AABB で候補 voxel を O(radius³/voxel_size³) に絞り込んだ後、
+    /// 各点について正確な距離判定を行う。
+    pub fn query_points_within_radius(
+        &self,
+        center: &Point3<f32>,
+        radius: f32,
+    ) -> Vec<Point3<f32>> {
+        let vs = self.config.voxel_size;
+        let r_sq = radius * radius;
+
+        // 半径をカバーする voxel 範囲を整数グリッドで計算
+        let half = (radius / vs).ceil() as i32;
+        let cx = (center.x / vs).floor() as i32;
+        let cy = (center.y / vs).floor() as i32;
+        let cz = (center.z / vs).floor() as i32;
+
+        let mut result = Vec::new();
+
+        for ix in (cx - half)..=(cx + half) {
+            for iy in (cy - half)..=(cy + half) {
+                for iz in (cz - half)..=(cz + half) {
+                    let key = VoxelKey { ix, iy, iz };
+                    let Some(cell) = self.voxel_map.get(&key) else {
+                        continue;
+                    };
+                    for (p, _) in &cell.points {
+                        let dx = p.x - center.x;
+                        let dy = p.y - center.y;
+                        let dz = p.z - center.z;
+                        if dx * dx + dy * dy + dz * dz <= r_sq {
+                            result.push(*p);
+                        }
+                    }
+                }
+            }
+        }
+
+        result
+    }
 }
+
+
