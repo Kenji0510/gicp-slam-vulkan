@@ -176,7 +176,7 @@ fn main() -> Result<()> {
         // --- Copy points to gpu memory ---
 
         // --- Downsample for density normalization ---
-        let downsampled_points_vec = source_voxel_gpu_context
+        let downsampled_source_points_vec = source_voxel_gpu_context
             .voxelization(&copy_source_gpu_context, downsample_voxel_size)?;
         // --- Downsample for density normalization ---
 
