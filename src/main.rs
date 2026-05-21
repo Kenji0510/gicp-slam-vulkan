@@ -122,6 +122,15 @@ fn main() -> Result<()> {
 
     // --- Build local voxel map (sliding window) ---
     let downsampled_points = convert_vec_to_point3(&downsampled_points_vec);
+    let mut global_voxel_map = LocalMap::new(LocalMapConfig {
+        voxel_size: downsample_voxel_size,
+        max_points_per_voxel: MAX_POINTS_PER_VOXEL,
+        min_points_per_voxel: MIN_POINTS_PER_VOXEL,
+        max_frames: usize::MAX, // No limit on frames for global map
+        max_distance: f32::INFINITY, // No distance-based eviction for global map
+    });
+    global_voxel_map.insert_frame(&downsampled_points, Point3::origin());
+
     let mut local_voxel_map = LocalMap::new(LocalMapConfig {
         voxel_size: downsample_voxel_size,
         max_points_per_voxel: MAX_POINTS_PER_VOXEL,
@@ -324,6 +333,7 @@ fn main() -> Result<()> {
         }
 
         local_voxel_map.insert_frame(&downsampled_source_points, origin);
+        global_voxel_map.insert_frame(&downsampled_source_points, origin);
         // --- Update local map ---
 
         let prev_pos = current_global_pose.fixed_view::<3, 1>(0, 3).into_owned();
@@ -335,10 +345,10 @@ fn main() -> Result<()> {
     }
 
     // --- Save final local map for visualization ---
-    let final_local_map_points_vec = convert_point3_to_vec(&local_voxel_map.get_all_points());
+    let final_global_map_points_vec = convert_point3_to_vec(&global_voxel_map.get_all_points());
     // let final_local_map_points = convert_vec_to_point3(&final_local_map_points_vec);
-    let save_path = format!("{}/final_local_map.pcd", SAVE_DIR);
-    save_pcd_xyzit(&convert_vec_to_xyz(&final_local_map_points_vec), &save_path)?;
+    let save_path = format!("{}/final_global_map.pcd", SAVE_DIR);
+    save_pcd_xyzit(&convert_vec_to_xyz(&final_global_map_points_vec), &save_path)?;
 
     Ok(())
 }
