@@ -467,6 +467,7 @@ fn main() -> Result<()> {
     } else { 0.0 };
 
     log::info!("===== Performance Statistics ({} frames) =====", n);
+    log::info!("  GICP iteration count          : {}", GICP_ITERATIONS);
     log::info!("  Query local map        : {:>8.2} ms/frame", avg(&performance_logs.create_voxel_map_time_ms));
     log::info!("  Voxelization           : {:>8.2} ms/frame", avg(&performance_logs.voxelization_time_ms));
     log::info!("  KNN search             : {:>8.2} ms/frame", avg(&performance_logs.knn_search_time_ms));
