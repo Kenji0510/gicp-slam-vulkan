@@ -28,7 +28,7 @@ use nalgebra::{Matrix4, Point3, Quaternion, UnitQuaternion, Vector3};
 const LOAD_DIR: &str = "data/input/05172026/park01";
 const SAVE_DIR: &str = "data/output/05202026/debug";
 
-const DOWNSAMPLE_VOXEL_SIZE: f32 = 0.2; // m
+const DOWNSAMPLE_VOXEL_SIZE: f32 = 0.5; // m
 const GICP_ITERATIONS: usize = 5;
 
 const MIN_DIST: f32 = 0.1;
@@ -38,7 +38,7 @@ const MAX_POINTS_PER_VOXEL: usize = 10;
 const MIN_POINTS_PER_VOXEL: usize = 3;
 
 const LOCAL_MAP_MAX_FRAMES: usize = 25;
-const LOCAL_MAP_MAX_DISTANCE: f32 = 20.0;
+const LOCAL_MAP_MAX_DISTANCE: f32 = 15.0;
 
 const SEARCH_RANGE: i32 = 3; // Range of 5x5x5 voxels
 const MAX_DIST_SQ: f32 = 1.0; // Optional maximum distance squared
@@ -449,7 +449,7 @@ fn main() -> Result<()> {
     }
 
     // --- Save logs ---
-    let log_save_path = format!("{}/performance_logs.json", SAVE_DIR);
+    let log_save_path = format!("{}/performance_logs_v-{}.json", SAVE_DIR, DOWNSAMPLE_VOXEL_SIZE);
     let log_file = std::fs::File::create(&log_save_path)?;
     serde_json::to_writer_pretty(log_file, &performance_logs)?;
     log::info!("Performance logs saved to {}", log_save_path);
@@ -486,7 +486,7 @@ fn main() -> Result<()> {
     // --- Save final local map for visualization ---
     let final_global_map_points_vec = convert_point3_to_vec(&global_voxel_map.get_all_points());
     // let final_local_map_points = convert_vec_to_point3(&final_local_map_points_vec);
-    let save_path = format!("{}/final_global_map.pcd", SAVE_DIR);
+    let save_path = format!("{}/final_global_map_v-{}.pcd", SAVE_DIR, DOWNSAMPLE_VOXEL_SIZE);
     save_pcd_xyzit(
         &convert_vec_to_xyz(&final_global_map_points_vec),
         &save_path,
