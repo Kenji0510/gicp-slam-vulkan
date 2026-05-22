@@ -26,9 +26,7 @@ fn fold_gicp(v: &[f32], gicp_iters: usize) -> Vec<f32> {
     if gicp_iters == 0 {
         return v.to_vec();
     }
-    v.chunks(gicp_iters)
-        .map(|c| c.iter().sum())
-        .collect()
+    v.chunks(gicp_iters).map(|c| c.iter().sum()).collect()
 }
 
 struct Series<'a> {
@@ -86,12 +84,15 @@ fn plot_series(series: &[Series], out_path: &str, title: &str) -> anyhow::Result
     Ok(())
 }
 
+const VOXEL_SIZE: f32 = 0.5;
+
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let json_path = args
-        .get(1)
-        .map(|s| s.as_str())
-        .unwrap_or("data/output/05202026/debug/performance_logs.json");
+    let default_path = format!(
+        "data/output/05212026/debug/performance_logs_v-{}.json",
+        VOXEL_SIZE
+    );
+    let json_path = args.get(1).map(|s| s.as_str()).unwrap_or(&default_path);
 
     let out_dir = PathBuf::from(json_path)
         .parent()
@@ -143,7 +144,9 @@ fn main() -> anyhow::Result<()> {
                 color: RGBColor(255, 140, 0),
             },
         ],
-        &out_dir.join("perf_per_frame.png").to_string_lossy(),
+        &out_dir
+            .join(format!("perf_per_frame_v-{}.png", VOXEL_SIZE))
+            .to_string_lossy(),
         "Per-frame processing time",
     )?;
 
@@ -171,7 +174,9 @@ fn main() -> anyhow::Result<()> {
                 color: MAGENTA,
             },
         ],
-        &out_dir.join("perf_gicp_detail.png").to_string_lossy(),
+        &out_dir
+            .join(format!("perf_gicp_detail_v-{}.png", VOXEL_SIZE))
+            .to_string_lossy(),
         "GICP iteration detail",
     )?;
 

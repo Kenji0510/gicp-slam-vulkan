@@ -18,11 +18,17 @@ use crate::{
     gpu_transform::TransformGpuContext, gpu_voxel::VoxelGpuContext, init_gpu::VulkanContext,
 };
 
+const MAX_DIST_SQ: f32 = 1.0; // In case of voxel size 0.5
+
 #[derive(bytemuck::Pod, bytemuck::Zeroable, Clone, Copy)]
 #[repr(C)]
 pub struct SearchNeighborParams {
     pub num_source: u32,
     pub num_target: u32,
+    pub table_size: u32,
+    pub search_range: i32,
+    pub voxel_size: f32,
+    pub max_dist_sq: f32,
 }
 
 pub struct SearchGpuContext {
@@ -104,6 +110,8 @@ impl SearchGpuContext {
         downsampled_source_pts_num: usize,
         downsample_target_gpu_context: &VoxelGpuContext,
         downsampled_target_pts_num: usize,
+        search_range: i32,
+        max_dist_sq: f32,
     ) -> Result<(Vec<i32>, Vec<f32>)> {
         let device = &self.vulkan_context.device;
         let queue = &self.vulkan_context.queue;
@@ -116,6 +124,10 @@ impl SearchGpuContext {
         let search_params = SearchNeighborParams {
             num_source: downsampled_source_pts_num as u32,
             num_target: downsampled_target_pts_num as u32,
+            table_size: downsample_target_gpu_context.table_size as u32,
+            search_range,
+            voxel_size: downsample_target_gpu_context.voxel_size,
+            max_dist_sq,
         };
 
         if self.current_capacity_pts < downsampled_source_pts_num {
@@ -191,7 +203,7 @@ impl SearchGpuContext {
                     source_transform_gpu_context
                         .d_buf_output_pts
                         .as_ref()
-                        .context("Failed to get output points buffer")?
+                        .context("Missing transformed source points")?
                         .clone(),
                 ),
                 vulkano::descriptor_set::WriteDescriptorSet::buffer(
@@ -199,21 +211,37 @@ impl SearchGpuContext {
                     downsample_target_gpu_context
                         .d_buf_out_pts
                         .as_ref()
-                        .context("Failed to get output points buffer")?
+                        .context("Missing target points")?
                         .clone(),
                 ),
                 vulkano::descriptor_set::WriteDescriptorSet::buffer(
                     2,
-                    self.d_buf_indices
+                    downsample_target_gpu_context
+                        .d_buf_keys
                         .as_ref()
-                        .context("Failed to get indices buffer")?
+                        .context("Missing target table keys")?
                         .clone(),
                 ),
                 vulkano::descriptor_set::WriteDescriptorSet::buffer(
                     3,
+                    downsample_target_gpu_context
+                        .d_buf_table_voxel_indices
+                        .as_ref()
+                        .context("Missing target table voxel indices")?
+                        .clone(),
+                ),
+                vulkano::descriptor_set::WriteDescriptorSet::buffer(
+                    4,
+                    self.d_buf_indices
+                        .as_ref()
+                        .context("Missing output indices buffer")?
+                        .clone(),
+                ),
+                vulkano::descriptor_set::WriteDescriptorSet::buffer(
+                    5,
                     self.d_buf_dists_sq
                         .as_ref()
-                        .context("Failed to get distances buffer")?
+                        .context("Missing output distances buffer")?
                         .clone(),
                 ),
             ],

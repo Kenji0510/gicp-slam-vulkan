@@ -40,7 +40,7 @@ const MIN_POINTS_PER_VOXEL: usize = 3;
 const LOCAL_MAP_MAX_FRAMES: usize = 25;
 const LOCAL_MAP_MAX_DISTANCE: f32 = 15.0;
 
-const SEARCH_RANGE: i32 = 3; // Range of 5x5x5 voxels
+const SEARCH_RANGE: i32 = 2; // Range of 5x5x5 voxels
 const MAX_DIST_SQ: f32 = 1.0; // Optional maximum distance squared
 
 // IMU coordination to LiDAR coordination (Robosense 96 beam)
@@ -268,10 +268,10 @@ fn main() -> Result<()> {
         // );
 
         let start = Instant::now();
-        let source_covariances = source_covariances_gpu_context
-            .compute_covariances(&source_voxel_gpu_context)?;
-        let target_covariances = target_covariances_gpu_context
-            .compute_covariances(&target_voxel_gpu_context)?;
+        let source_covariances =
+            source_covariances_gpu_context.compute_covariances(&source_voxel_gpu_context)?;
+        let target_covariances =
+            target_covariances_gpu_context.compute_covariances(&target_voxel_gpu_context)?;
         let duration = start.elapsed();
         performance_logs
             .compute_covariances_time_ms
@@ -337,6 +337,8 @@ fn main() -> Result<()> {
                 source_voxel_gpu_context.h_downsampled_pts_num,
                 &target_voxel_gpu_context,
                 target_voxel_gpu_context.h_downsampled_pts_num,
+                SEARCH_RANGE,
+                MAX_DIST_SQ,
             )?;
             let duration_search_neighbor = start_search_neighbor.elapsed();
             performance_logs
@@ -449,7 +451,10 @@ fn main() -> Result<()> {
     }
 
     // --- Save logs ---
-    let log_save_path = format!("{}/performance_logs_v-{}.json", SAVE_DIR, DOWNSAMPLE_VOXEL_SIZE);
+    let log_save_path = format!(
+        "{}/performance_logs_v-{}.json",
+        SAVE_DIR, DOWNSAMPLE_VOXEL_SIZE
+    );
     let log_file = std::fs::File::create(&log_save_path)?;
     serde_json::to_writer_pretty(log_file, &performance_logs)?;
     log::info!("Performance logs saved to {}", log_save_path);
@@ -457,26 +462,57 @@ fn main() -> Result<()> {
 
     // --- Print performance statistics ---
     let avg = |v: &Vec<f32>| -> f32 {
-        if v.is_empty() { 0.0 } else { v.iter().sum::<f32>() / v.len() as f32 }
+        if v.is_empty() {
+            0.0
+        } else {
+            v.iter().sum::<f32>() / v.len() as f32
+        }
     };
     let n = performance_logs.iteration_count;
     let each_gicp_avg = avg(&performance_logs.each_gicp_time_ms);
     // each_gicp_time_ms は GICP_ITERATIONS 分のエントリが含まれるので 1イテレーションあたりに換算
     let each_gicp_per_iter = if n > 0 {
         performance_logs.each_gicp_time_ms.iter().sum::<f32>() / n as f32
-    } else { 0.0 };
+    } else {
+        0.0
+    };
 
     log::info!("===== Performance Statistics ({} frames) =====", n);
+    log::info!("  Downsample voxel size   : {} m", DOWNSAMPLE_VOXEL_SIZE);
     log::info!("  GICP iteration count          : {}", GICP_ITERATIONS);
-    log::info!("  Query local map        : {:>8.2} ms/frame", avg(&performance_logs.create_voxel_map_time_ms));
-    log::info!("  Voxelization           : {:>8.2} ms/frame", avg(&performance_logs.voxelization_time_ms));
-    log::info!("  KNN search             : {:>8.2} ms/frame", avg(&performance_logs.knn_search_time_ms));
-    log::info!("  Covariance computation : {:>8.2} ms/frame", avg(&performance_logs.compute_covariances_time_ms));
-    log::info!("  Point transform        : {:>8.2} ms/call ",  avg(&performance_logs.transform_points_time_ms));
-    log::info!("  Neighbor search        : {:>8.2} ms/call ",  avg(&performance_logs.find_neighbors_time_ms));
-    log::info!("  GICP solve (per call)  : {:>8.2} ms/call ",  each_gicp_avg);
-    log::info!("  GICP total             : {:>8.2} ms/frame", avg(&performance_logs.total_gicp_time_ms));
-    log::info!("  Map update             : {:>8.2} ms/frame", avg(&performance_logs.update_voxel_map_time_ms));
+    log::info!(
+        "  Query local map        : {:>8.2} ms/frame",
+        avg(&performance_logs.create_voxel_map_time_ms)
+    );
+    log::info!(
+        "  Voxelization           : {:>8.2} ms/frame",
+        avg(&performance_logs.voxelization_time_ms)
+    );
+    log::info!(
+        "  KNN search             : {:>8.2} ms/frame",
+        avg(&performance_logs.knn_search_time_ms)
+    );
+    log::info!(
+        "  Covariance computation : {:>8.2} ms/frame",
+        avg(&performance_logs.compute_covariances_time_ms)
+    );
+    log::info!(
+        "  Point transform        : {:>8.2} ms/call ",
+        avg(&performance_logs.transform_points_time_ms)
+    );
+    log::info!(
+        "  Neighbor search        : {:>8.2} ms/call ",
+        avg(&performance_logs.find_neighbors_time_ms)
+    );
+    log::info!("  GICP solve (per call)  : {:>8.2} ms/call ", each_gicp_avg);
+    log::info!(
+        "  GICP total             : {:>8.2} ms/frame",
+        avg(&performance_logs.total_gicp_time_ms)
+    );
+    log::info!(
+        "  Map update             : {:>8.2} ms/frame",
+        avg(&performance_logs.update_voxel_map_time_ms)
+    );
     log::info!("================================================");
 
     // --- Debug ---
@@ -486,7 +522,10 @@ fn main() -> Result<()> {
     // --- Save final local map for visualization ---
     let final_global_map_points_vec = convert_point3_to_vec(&global_voxel_map.get_all_points());
     // let final_local_map_points = convert_vec_to_point3(&final_local_map_points_vec);
-    let save_path = format!("{}/final_global_map_v-{}.pcd", SAVE_DIR, DOWNSAMPLE_VOXEL_SIZE);
+    let save_path = format!(
+        "{}/final_global_map_v-{}.pcd",
+        SAVE_DIR, DOWNSAMPLE_VOXEL_SIZE
+    );
     save_pcd_xyzit(
         &convert_vec_to_xyz(&final_global_map_points_vec),
         &save_path,
