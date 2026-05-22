@@ -27,6 +27,9 @@ const K_NEIGHBORS: usize = 8;
 #[repr(C)]
 pub struct CovarianceParams {
     pub num_points: u32,
+    pub table_size: i32,
+    pub voxel_size: f32,
+    _pad: i32,
 }
 
 pub struct CovarianceGpuContext {
@@ -102,7 +105,7 @@ impl CovarianceGpuContext {
     pub fn compute_covariances(
         &mut self,
         target_voxel_gpu_context: &VoxelGpuContext,
-        knn_search_gpu_context: &KnnSearchGpuContext,
+        // knn_search_gpu_context: &KnnSearchGpuContext,
     ) -> Result<Vec<[f32; 9]>> {
         let device = &self.vulkan_context.device;
         let queue = &self.vulkan_context.queue;
@@ -115,6 +118,9 @@ impl CovarianceGpuContext {
         let target_pts_num = target_voxel_gpu_context.h_downsampled_pts_num;
         let covariance_params = CovarianceParams {
             num_points: target_pts_num as u32,
+            table_size: target_voxel_gpu_context.table_size,
+            voxel_size: target_voxel_gpu_context.voxel_size,
+            _pad: 0,
         };
 
         if self.current_capacity_pts < target_pts_num {
@@ -165,14 +171,30 @@ impl CovarianceGpuContext {
                 ),
                 vulkano::descriptor_set::WriteDescriptorSet::buffer(
                     1,
-                    knn_search_gpu_context
-                        .d_buf_indices
+                    target_voxel_gpu_context
+                        .d_buf_keys
                         .as_ref()
-                        .context("Failed to get indices buffer")?
+                        .context("Failed to get keys buffer")?
                         .clone(),
                 ),
                 vulkano::descriptor_set::WriteDescriptorSet::buffer(
                     2,
+                    target_voxel_gpu_context
+                        .d_buf_centroids
+                        .as_ref()
+                        .context("Failed to get centroids buffer")?
+                        .clone(),
+                ),
+                vulkano::descriptor_set::WriteDescriptorSet::buffer(
+                    3,
+                    target_voxel_gpu_context
+                        .d_buf_counts
+                        .as_ref()
+                        .context("Failed to get counts buffer")?
+                        .clone(),
+                ),
+                vulkano::descriptor_set::WriteDescriptorSet::buffer(
+                    4,
                     self.d_buf_covariances
                         .as_ref()
                         .context("Failed to get covariances buffer")?

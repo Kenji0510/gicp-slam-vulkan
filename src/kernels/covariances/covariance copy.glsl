@@ -255,16 +255,20 @@ void main() {
     float evals[3];
     eigen_decomposition_3x3(mat, evecs, evals);
 
-    // 法線方向（最小固有値）を 1e-3 に正則化、残りは 1.0
     int min_idx = 0;
     if (evals[1] < evals[min_idx]) min_idx = 1;
     if (evals[2] < evals[min_idx]) min_idx = 2;
 
+    // float reg_evals[3] = float[](evals[0], evals[1], evals[2]);
+    float max_eval = max(evals[0], max(evals[1], evals[2]));
     float reg_evals[3];
-    reg_evals[0] = 1.0;
-    reg_evals[1] = 1.0;
-    reg_evals[2] = 1.0;
-    reg_evals[min_idx] = 1e-3;
+    if (max_eval > 0.0) {
+        reg_evals[0] = max(evals[0] / max_eval, 1e-6);
+        reg_evals[1] = max(evals[1] / max_eval, 1e-6);
+        reg_evals[2] = max(evals[2] / max_eval, 1e-6);
+    } else {
+        reg_evals[0] = 1.0; reg_evals[1] = 1.0; reg_evals[2] = 1.0;
+    }
 
     // C = V * diag(reg_evals) * V^T
     float r00 = 0.0, r01 = 0.0, r02 = 0.0;
@@ -297,3 +301,14 @@ void main() {
     out_covariances[base + 7] = r12;
     out_covariances[base + 8] = r22;
 }
+
+// 法線方向（最小固有値）を 1e-3 に正則化、残りは 1.0
+    int min_idx = 0;
+    if (evals[1] < evals[min_idx]) min_idx = 1;
+    if (evals[2] < evals[min_idx]) min_idx = 2;
+
+    float reg_evals[3];
+    reg_evals[0] = 1.0;
+    reg_evals[1] = 1.0;
+    reg_evals[2] = 1.0;
+    reg_evals[min_idx] = 1e-3;

@@ -26,7 +26,7 @@ use gicp_slam_vulkan::{
 use nalgebra::{Matrix4, Point3, Quaternion, UnitQuaternion, Vector3};
 
 const LOAD_DIR: &str = "data/input/05172026/park01";
-const SAVE_DIR: &str = "data/output/05202026/debug";
+const SAVE_DIR: &str = "data/output/05212026/debug";
 
 const DOWNSAMPLE_VOXEL_SIZE: f32 = 0.5; // m
 const GICP_ITERATIONS: usize = 5;
@@ -255,23 +255,23 @@ fn main() -> Result<()> {
         let mut current_transform = pose_prediction.0;
 
         // --- Compute covariance for each point ---
-        let start = Instant::now();
-        source_knn_gpu_context.knn_search_neighbors(&source_voxel_gpu_context)?;
-        target_knn_gpu_context.knn_search_neighbors(&target_voxel_gpu_context)?;
-        let duration = start.elapsed();
-        performance_logs
-            .knn_search_time_ms
-            .push(duration.as_secs_f32() * 1000.0);
-        log::debug!(
-            "KNN search completed in {:.2} ms",
-            performance_logs.knn_search_time_ms.last().unwrap()
-        );
+        // let start = Instant::now();
+        // source_knn_gpu_context.knn_search_neighbors(&source_voxel_gpu_context)?;
+        // target_knn_gpu_context.knn_search_neighbors(&target_voxel_gpu_context)?;
+        // let duration = start.elapsed();
+        // performance_logs
+        //     .knn_search_time_ms
+        //     .push(duration.as_secs_f32() * 1000.0);
+        // log::debug!(
+        //     "KNN search completed in {:.2} ms",
+        //     performance_logs.knn_search_time_ms.last().unwrap()
+        // );
 
         let start = Instant::now();
         let source_covariances = source_covariances_gpu_context
-            .compute_covariances(&source_voxel_gpu_context, &source_knn_gpu_context)?;
+            .compute_covariances(&source_voxel_gpu_context)?;
         let target_covariances = target_covariances_gpu_context
-            .compute_covariances(&target_voxel_gpu_context, &target_knn_gpu_context)?;
+            .compute_covariances(&target_voxel_gpu_context)?;
         let duration = start.elapsed();
         performance_logs
             .compute_covariances_time_ms
