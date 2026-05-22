@@ -84,7 +84,7 @@ fn plot_series(series: &[Series], out_path: &str, title: &str) -> anyhow::Result
     Ok(())
 }
 
-const VOXEL_SIZE: f32 = 0.5;
+const VOXEL_SIZE: f32 = 0.25;
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();

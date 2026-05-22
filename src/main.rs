@@ -28,7 +28,7 @@ use nalgebra::{Matrix4, Point3, Quaternion, UnitQuaternion, Vector3};
 const LOAD_DIR: &str = "data/input/05172026/park01";
 const SAVE_DIR: &str = "data/output/05212026/debug";
 
-const DOWNSAMPLE_VOXEL_SIZE: f32 = 0.5; // m
+const DOWNSAMPLE_VOXEL_SIZE: f32 = 0.2; // m
 const GICP_ITERATIONS: usize = 5;
 
 const MIN_DIST: f32 = 0.1;
@@ -38,9 +38,9 @@ const MAX_POINTS_PER_VOXEL: usize = 10;
 const MIN_POINTS_PER_VOXEL: usize = 3;
 
 const LOCAL_MAP_MAX_FRAMES: usize = 25;
-const LOCAL_MAP_MAX_DISTANCE: f32 = 15.0;
+const LOCAL_MAP_MAX_DISTANCE: f32 = 20.0;
 
-const SEARCH_RANGE: i32 = 2; // Range of 5x5x5 voxels
+const SEARCH_RANGE: i32 = 2; // Range of 7x7x7 voxels
 const MAX_DIST_SQ: f32 = 1.0; // Optional maximum distance squared
 
 // IMU coordination to LiDAR coordination (Robosense 96 beam)
