@@ -41,13 +41,14 @@ pub struct GicpGpuContext {
     pipeline_layout_search: Arc<PipelineLayout>,
     descriptor_set_layout_search: Arc<DescriptorSetLayout>,
 
-    pub d_buf_h: Option<Subbuffer<[f32]>>,
-    pub d_buf_b: Option<Subbuffer<[f32]>>,
+    // ワークグループごとの部分和バッファ (size = capacity_groups × 36/6)
+    pub d_buf_partial_h: Option<Subbuffer<[f32]>>,
+    pub d_buf_partial_b: Option<Subbuffer<[f32]>>,
 
-    pub staging_buf_h: Option<Subbuffer<[f32]>>,
-    pub staging_buf_b: Option<Subbuffer<[f32]>>,
+    pub staging_buf_partial_h: Option<Subbuffer<[f32]>>,
+    pub staging_buf_partial_b: Option<Subbuffer<[f32]>>,
 
-    is_initialized: bool,
+    capacity_groups: usize,
 }
 
 impl GicpGpuContext {
@@ -95,11 +96,11 @@ impl GicpGpuContext {
             compute_pipeline_search: compute_pipeline_icp.clone(),
             pipeline_layout_search: pipeline_layout_icp.clone(),
             descriptor_set_layout_search: descriptor_set_layout_icp.clone(),
-            d_buf_h: None,
-            d_buf_b: None,
-            staging_buf_h: None,
-            staging_buf_b: None,
-            is_initialized: false,
+            d_buf_partial_h: None,
+            d_buf_partial_b: None,
+            staging_buf_partial_h: None,
+            staging_buf_partial_b: None,
+            capacity_groups: 0,
         })
     }
 
@@ -125,40 +126,41 @@ impl GicpGpuContext {
             max_dist_sq,
         };
 
-        if self.is_initialized == false {
-            debug!("Allocating buffers for H and b matrix");
+        const LOCAL_SIZE: usize = 64;
+        let num_groups = (source_pts_num + LOCAL_SIZE - 1) / LOCAL_SIZE;
 
-            self.d_buf_h = Some(Buffer::new_slice::<f32>(
+        // partial バッファが不足していれば再確保
+        if num_groups > self.capacity_groups {
+            let new_cap = (num_groups as f64 * 1.5) as usize + 1;
+            debug!("Allocating partial H/b buffers for {} groups", new_cap);
+
+            self.d_buf_partial_h = Some(Buffer::new_slice::<f32>(
                 memory_allocator.clone(),
                 BufferCreateInfo {
-                    usage: BufferUsage::STORAGE_BUFFER
-                        | BufferUsage::TRANSFER_SRC
-                        | BufferUsage::TRANSFER_DST,
+                    usage: BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC,
                     ..Default::default()
                 },
                 AllocationCreateInfo {
                     memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
                     ..Default::default()
                 },
-                6 * 6,
+                (new_cap * 36) as u64,
             )?);
 
-            self.d_buf_b = Some(Buffer::new_slice::<f32>(
+            self.d_buf_partial_b = Some(Buffer::new_slice::<f32>(
                 memory_allocator.clone(),
                 BufferCreateInfo {
-                    usage: BufferUsage::STORAGE_BUFFER
-                        | BufferUsage::TRANSFER_SRC
-                        | BufferUsage::TRANSFER_DST,
+                    usage: BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC,
                     ..Default::default()
                 },
                 AllocationCreateInfo {
                     memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
                     ..Default::default()
                 },
-                6,
+                (new_cap * 6) as u64,
             )?);
 
-            self.staging_buf_h = Some(Buffer::new_slice::<f32>(
+            self.staging_buf_partial_h = Some(Buffer::new_slice::<f32>(
                 memory_allocator.clone(),
                 BufferCreateInfo {
                     usage: BufferUsage::TRANSFER_DST,
@@ -169,10 +171,10 @@ impl GicpGpuContext {
                         | MemoryTypeFilter::HOST_RANDOM_ACCESS,
                     ..Default::default()
                 },
-                6 * 6,
+                (new_cap * 36) as u64,
             )?);
 
-            self.staging_buf_b = Some(Buffer::new_slice::<f32>(
+            self.staging_buf_partial_b = Some(Buffer::new_slice::<f32>(
                 memory_allocator.clone(),
                 BufferCreateInfo {
                     usage: BufferUsage::TRANSFER_DST,
@@ -183,10 +185,10 @@ impl GicpGpuContext {
                         | MemoryTypeFilter::HOST_RANDOM_ACCESS,
                     ..Default::default()
                 },
-                6,
+                (new_cap * 6) as u64,
             )?);
 
-            self.is_initialized = true;
+            self.capacity_groups = new_cap;
         }
 
         let descriptor_set = DescriptorSet::new(
@@ -227,17 +229,19 @@ impl GicpGpuContext {
                 ),
                 vulkano::descriptor_set::WriteDescriptorSet::buffer(
                     6,
-                    self.d_buf_h
+                    self.d_buf_partial_h
                         .as_ref()
-                        .context("Failed to get H buffer")?
-                        .clone(),
+                        .context("Failed to get partial H buffer")?
+                        .clone()
+                        .slice(0..(num_groups * 36) as u64),
                 ),
                 vulkano::descriptor_set::WriteDescriptorSet::buffer(
                     7,
-                    self.d_buf_b
+                    self.d_buf_partial_b
                         .as_ref()
-                        .context("Failed to get b buffer")?
-                        .clone(),
+                        .context("Failed to get partial b buffer")?
+                        .clone()
+                        .slice(0..(num_groups * 6) as u64),
                 ),
             ],
             [],
@@ -251,29 +255,8 @@ impl GicpGpuContext {
         )
         .context("Failed to create command buffer builder")?;
 
-        command_buffer_builder
-            .fill_buffer(
-                self.d_buf_h
-                    .as_ref()
-                    .context("Failed to get H buffer")?
-                    .clone()
-                    .reinterpret::<[u32]>(),
-                0u32,
-            )
-            .context("Failed to fill H buffer with zeros")?
-            .fill_buffer(
-                self.d_buf_b
-                    .as_ref()
-                    .context("Failed to get b buffer")?
-                    .clone()
-                    .reinterpret::<[u32]>(),
-                0u32,
-            )
-            .context("Failed to fill b buffer with zeros")?;
-
-        const LOCAL_SIZE: u32 = 64; // Match the local size to BLOCK_SIZE in the shader
-        let group_count_x = (source_pts_num as u32 + LOCAL_SIZE - 1) / LOCAL_SIZE;
-        let work_group_count = [group_count_x, 1, 1];
+        // partial バッファは毎回上書きするため fill_buffer 不要
+        let work_group_count = [num_groups as u32, 1, 1];
 
         unsafe {
             command_buffer_builder
@@ -292,47 +275,35 @@ impl GicpGpuContext {
                 .context("Failed to dispatch compute shader")?;
         }
 
-        // <!--- Copy H from GPU to staging buffer --->
-        let copy_output_h_src = self
-            .d_buf_h
-            .as_ref()
-            .context("Failed to get output H buffer for copy")?
-            .clone()
-            .slice(0..(6 * 6) as u64);
-        let copy_output_h_dst = self
-            .staging_buf_h
-            .as_ref()
-            .context("Failed to get staging buffer for H copy")?
-            .clone()
-            .slice(0..(6 * 6) as u64);
+        // partial H/b を staging へコピー（num_groups 分のみ）
         command_buffer_builder
             .copy_buffer(CopyBufferInfo::buffers(
-                copy_output_h_src,
-                copy_output_h_dst,
+                self.d_buf_partial_h
+                    .as_ref()
+                    .context("Failed to get partial H buffer")?
+                    .clone()
+                    .slice(0..(num_groups * 36) as u64),
+                self.staging_buf_partial_h
+                    .as_ref()
+                    .context("Failed to get staging H buffer")?
+                    .clone()
+                    .slice(0..(num_groups * 36) as u64),
             ))
-            .context("Failed to copy output H to staging buffer")?;
-        // <!--- Copy H from GPU to staging buffer --->
-
-        // <!--- Copy b from GPU to staging buffer --->
-        let copy_output_b_src = self
-            .d_buf_b
-            .as_ref()
-            .context("Failed to get output b buffer for copy")?
-            .clone()
-            .slice(0..6 as u64);
-        let copy_output_b_dst = self
-            .staging_buf_b
-            .as_ref()
-            .context("Failed to get staging buffer for b copy")?
-            .clone()
-            .slice(0..6 as u64);
+            .context("Failed to copy partial H to staging")?;
         command_buffer_builder
             .copy_buffer(CopyBufferInfo::buffers(
-                copy_output_b_src,
-                copy_output_b_dst,
+                self.d_buf_partial_b
+                    .as_ref()
+                    .context("Failed to get partial b buffer")?
+                    .clone()
+                    .slice(0..(num_groups * 6) as u64),
+                self.staging_buf_partial_b
+                    .as_ref()
+                    .context("Failed to get staging b buffer")?
+                    .clone()
+                    .slice(0..(num_groups * 6) as u64),
             ))
-            .context("Failed to copy output b to staging buffer")?;
-        // <!--- Copy b from GPU to staging buffer --->
+            .context("Failed to copy partial b to staging")?;
 
         let command_buffer = command_buffer_builder.build()?;
 
@@ -346,21 +317,28 @@ impl GicpGpuContext {
         let compute_end_time = compute_start_time.elapsed();
         debug!("Compute icp shader execution time: {:?}", compute_end_time);
 
-        // <!--- Copy results from staging buffer to CPU --->
-        let h_content = self
-            .staging_buf_h
+        // partial バッファを CPU で sum して H(36), b(6) を得る
+        let h_partials = self
+            .staging_buf_partial_h
             .as_ref()
-            .context("Failed to get staging buffer for H read")?
+            .context("Failed to get staging partial H buffer")?
             .read()?;
-        let output_h: Vec<f32> = h_content.iter().take(6 * 6 as usize).copied().collect();
+        let b_partials = self
+            .staging_buf_partial_b
+            .as_ref()
+            .context("Failed to get staging partial b buffer")?
+            .read()?;
 
-        let distances_content = self
-            .staging_buf_b
-            .as_ref()
-            .context("Failed to get staging buffer for b read")?
-            .read()?;
-        let output_b: Vec<f32> = distances_content.iter().take(6 as usize).copied().collect();
-        // <!--- Copy results from staging buffer to CPU --->
+        let mut output_h = vec![0.0f32; 36];
+        let mut output_b = vec![0.0f32; 6];
+        for g in 0..num_groups {
+            for i in 0..36 {
+                output_h[i] += h_partials[g * 36 + i];
+            }
+            for i in 0..6 {
+                output_b[i] += b_partials[g * 6 + i];
+            }
+        }
 
         Ok((output_h, output_b))
     }

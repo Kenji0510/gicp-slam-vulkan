@@ -15,14 +15,15 @@ layout(set = 0, binding = 2) readonly buffer TargetPts  { float target_pts[];  }
 layout(set = 0, binding = 3) readonly buffer TargetCovs { float target_covs[]; };
 layout(set = 0, binding = 4) readonly buffer Indices    { int   indices[];      };
 layout(set = 0, binding = 5) readonly buffer Distances  { float dists_sq[];     };
-layout(set = 0, binding = 6) buffer OutH { uint d_H[]; };  // 6x6 row-major
-layout(set = 0, binding = 7) buffer OutB { uint d_b[]; };  // 6x1
+// ワークグループごとの部分和バッファ（グローバルアトミック不要）
+// レイアウト: [wg_id * 36 + i] for H,  [wg_id * 6 + i] for b
+layout(set = 0, binding = 6) buffer OutPartialH { float d_partial_H[]; };
+layout(set = 0, binding = 7) buffer OutPartialB { float d_partial_b[]; };
 
 // ---- shared memory (per-block accumulator) ----
 shared uint s_H[36];
 shared uint s_b[6];
 
-// ---- float atomic add via CAS ----
 void atomicAddSharedH(uint idx, float val) {
     uint old_val = s_H[idx];
     uint assumed;
@@ -39,26 +40,6 @@ void atomicAddSharedB(uint idx, float val) {
     do {
         assumed = old_val;
         old_val = atomicCompSwap(s_b[idx], assumed,
-                      floatBitsToUint(uintBitsToFloat(assumed) + val));
-    } while (assumed != old_val);
-}
-
-void atomicAddH(uint idx, float val) {
-    uint old_val = d_H[idx];
-    uint assumed;
-    do {
-        assumed = old_val;
-        old_val = atomicCompSwap(d_H[idx], assumed,
-                      floatBitsToUint(uintBitsToFloat(assumed) + val));
-    } while (assumed != old_val);
-}
-
-void atomicAddB(uint idx, float val) {
-    uint old_val = d_b[idx];
-    uint assumed;
-    do {
-        assumed = old_val;
-        old_val = atomicCompSwap(d_b[idx], assumed,
                       floatBitsToUint(uintBitsToFloat(assumed) + val));
     } while (assumed != old_val);
 }
@@ -187,15 +168,14 @@ void main() {
     }
     barrier();
 
-    // thread 0 が global memory へ書き出し
-    if (lid == 0u) {
-        for (int i = 0; i < 36; i++) {
-            float val = uintBitsToFloat(s_H[i]);
-            if (val != 0.0) atomicAddH(uint(i), val);
-        }
-        for (int i = 0; i < 6; i++) {
-            float val = uintBitsToFloat(s_b[i]);
-            if (val != 0.0) atomicAddB(uint(i), val);
-        }
+    // shared memory → ワークグループ固有スロットへ単純 store（グローバルアトミック不要）
+    // d_partial_H[wg_id * 36 + i],  d_partial_b[wg_id * 6 + i]
+    barrier();
+    uint wg_id = gl_WorkGroupID.x;
+    if (lid < 36u) {
+        d_partial_H[wg_id * 36u + lid] = uintBitsToFloat(s_H[lid]);
+    }
+    if (lid < 6u) {
+        d_partial_b[wg_id * 6u + lid] = uintBitsToFloat(s_b[lid]);
     }
 }
