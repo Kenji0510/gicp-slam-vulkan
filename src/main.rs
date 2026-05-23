@@ -29,23 +29,23 @@ const LOAD_DIR: &str = "data/input/05172026/park01";
 const SAVE_DIR: &str = "data/output/05222026/debug";
 
 const DOWNSAMPLE_VOXEL_SIZE: f32 = 0.2; // m
-const GICP_ITERATIONS: usize = 5;
+const GICP_ITERATIONS: usize = 3;  // Default: 5
 
 const MIN_DIST: f32 = 0.1;
 const MAX_DIST: f32 = 45.0;
 
-const MAX_POINTS_PER_VOXEL: usize = 30;
+const MAX_POINTS_PER_VOXEL: usize = 60;
 const MIN_POINTS_PER_VOXEL: usize = 3;
 
 const LOCAL_MAP_MAX_FRAMES: usize = 25;
 const LOCAL_MAP_MAX_DISTANCE: f32 = 20.0;
 
-const SEARCH_RANGE: i32 = 2; // Range of 7x7x7 voxels
+const SEARCH_RANGE: i32 = 2; // Range of 5x5x5 voxels
 const MAX_DIST_SQ: f32 = 1.0; // Optional maximum distance squared
 
 /// LocalMap のハッシュグリッドセルサイズ。
 /// downsample_voxel_size とは独立に設定する。大きいほど query が高速。
-const LOCAL_MAP_INDEX_VOXEL_SIZE: f32 = 0.35;
+const LOCAL_MAP_INDEX_VOXEL_SIZE: f32 = 1.0;
 
 // IMU coordination to LiDAR coordination (Robosense 96 beam)
 // Quaternion (x, y, z, w): -0.705437, 0.708767, -0.00246579, 0.00097028
@@ -244,8 +244,8 @@ fn main() -> Result<()> {
         let start = Instant::now();
         let downsampled_source_points_vec = source_voxel_gpu_context
             .voxelization(&copy_source_gpu_context, downsample_voxel_size)?;
-        let downsampled_local_map_points_vec = target_voxel_gpu_context
-            .voxelization(&copy_target_gpu_context, downsample_voxel_size)?;
+        target_voxel_gpu_context
+            .voxelization_gpu_only(&copy_target_gpu_context, downsample_voxel_size)?;;
         let duration = start.elapsed();
         performance_logs
             .voxelization_time_ms
@@ -272,10 +272,8 @@ fn main() -> Result<()> {
         // );
 
         let start = Instant::now();
-        let source_covariances =
-            source_covariances_gpu_context.compute_covariances(&source_voxel_gpu_context)?;
-        let target_covariances =
-            target_covariances_gpu_context.compute_covariances(&target_voxel_gpu_context)?;
+        source_covariances_gpu_context.compute_covariances_gpu_only(&source_voxel_gpu_context)?;
+        target_covariances_gpu_context.compute_covariances_gpu_only(&target_voxel_gpu_context)?;
         let duration = start.elapsed();
         performance_logs
             .compute_covariances_time_ms

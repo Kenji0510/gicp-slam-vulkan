@@ -102,10 +102,11 @@ impl CovarianceGpuContext {
         })
     }
 
-    pub fn compute_covariances(
+    fn compute_covariances_impl(
         &mut self,
         target_voxel_gpu_context: &VoxelGpuContext,
         // knn_search_gpu_context: &KnnSearchGpuContext,
+        read_back: bool,
     ) -> Result<Vec<[f32; 9]>> {
         let device = &self.vulkan_context.device;
         let queue = &self.vulkan_context.queue;
@@ -234,24 +235,26 @@ impl CovarianceGpuContext {
         }
 
         // <!--- Copy target covariances from GPU to staging buffer --->
-        let copy_output_covariances_src = self
-            .d_buf_covariances
-            .as_ref()
-            .context("Failed to get output covariances buffer for copy")?
-            .clone()
-            .slice(0..(target_pts_num * 9) as u64);
-        let copy_output_covariances_dst = self
-            .staging_buf_covariances
-            .as_ref()
-            .context("Failed to get staging buffer for covariances copy")?
-            .clone()
-            .slice(0..(target_pts_num * 9) as u64);
-        command_buffer_builder
-            .copy_buffer(CopyBufferInfo::buffers(
-                copy_output_covariances_src,
-                copy_output_covariances_dst,
-            ))
-            .context("Failed to copy output covariances to staging buffer")?;
+        if read_back {
+            let copy_output_covariances_src = self
+                .d_buf_covariances
+                .as_ref()
+                .context("Failed to get output covariances buffer for copy")?
+                .clone()
+                .slice(0..(target_pts_num * 9) as u64);
+            let copy_output_covariances_dst = self
+                .staging_buf_covariances
+                .as_ref()
+                .context("Failed to get staging buffer for covariances copy")?
+                .clone()
+                .slice(0..(target_pts_num * 9) as u64);
+            command_buffer_builder
+                .copy_buffer(CopyBufferInfo::buffers(
+                    copy_output_covariances_src,
+                    copy_output_covariances_dst,
+                ))
+                .context("Failed to copy output covariances to staging buffer")?;
+        }
         // <!--- Copy target covariances from GPU to staging buffer --->
 
         let command_buffer = command_buffer_builder.build()?;
@@ -270,19 +273,38 @@ impl CovarianceGpuContext {
         );
 
         // <!--- Copy results from staging buffer to CPU --->
-        let covariances_content = self
-            .staging_buf_covariances
-            .as_ref()
-            .context("Failed to get staging buffer for covariances read")?
-            .read()?;
-        let output_covariances: Vec<[f32; 9]> = covariances_content
-            .chunks_exact(9)
-            .take(target_pts_num as usize)
-            .map(|c| [c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8]])
-            .collect();
+        let output_covariances = if read_back {
+            let covariances_content = self
+                .staging_buf_covariances
+                .as_ref()
+                .context("Failed to get staging buffer for covariances read")?
+                .read()?;
+            covariances_content
+                .chunks_exact(9)
+                .take(target_pts_num as usize)
+                .map(|c| [c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8]])
+                .collect()
+        } else {
+            vec![]
+        };
         // <!--- Copy results from staging buffer to CPU --->
 
         Ok(output_covariances)
+    }
+
+    pub fn compute_covariances(
+        &mut self,
+        target_voxel_gpu_context: &VoxelGpuContext,
+    ) -> Result<Vec<[f32; 9]>> {
+        self.compute_covariances_impl(target_voxel_gpu_context, true)
+    }
+
+    pub fn compute_covariances_gpu_only(
+        &mut self,
+        target_voxel_gpu_context: &VoxelGpuContext,
+    ) -> Result<()> {
+        self.compute_covariances_impl(target_voxel_gpu_context, false)?;
+        Ok(())
     }
 }
 

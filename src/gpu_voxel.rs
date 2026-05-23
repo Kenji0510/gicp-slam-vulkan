@@ -196,10 +196,11 @@ impl VoxelGpuContext {
         })
     }
 
-    pub fn voxelization(
+    fn voxelization_impl(
         &mut self,
         data_on_gpu: &GpuTransferDataContext,
         voxel_size: f32,
+        read_back_pts: bool,
     ) -> Result<Vec<[f32; 3]>> {
         let num_pts = data_on_gpu.num_points as usize;
         if num_pts == 0 {
@@ -596,19 +597,22 @@ impl VoxelGpuContext {
                 .dispatch(work_group_count)?;
         }
 
-        let copy_out_src = self
-            .d_buf_out_pts
-            .as_ref()
-            .context("d_buf_out_pts is None")?
-            .clone()
-            .slice(0..(num_pts * 3) as u64);
-        let copy_out_dst = self
-            .staging_buf_output_pts
-            .as_ref()
-            .context("staging_buf_output_pts is None")?
-            .clone()
-            .slice(0..(num_pts * 3) as u64);
-        command_buffer_builder.copy_buffer(CopyBufferInfo::buffers(copy_out_src, copy_out_dst))?;
+        if read_back_pts {
+            let copy_out_src = self
+                .d_buf_out_pts
+                .as_ref()
+                .context("d_buf_out_pts is None")?
+                .clone()
+                .slice(0..(num_pts * 3) as u64);
+            let copy_out_dst = self
+                .staging_buf_output_pts
+                .as_ref()
+                .context("staging_buf_output_pts is None")?
+                .clone()
+                .slice(0..(num_pts * 3) as u64);
+            command_buffer_builder
+                .copy_buffer(CopyBufferInfo::buffers(copy_out_src, copy_out_dst))?;
+        }
         command_buffer_builder.copy_buffer(CopyBufferInfo::buffers(
             self.d_buf_counter
                 .as_ref()
@@ -643,22 +647,47 @@ impl VoxelGpuContext {
         let num_output_points = counter_content[0] as usize;
         debug!("Number of output points: {}", num_output_points);
 
-        let out_pts_content = self
-            .staging_buf_output_pts
-            .as_ref()
-            .context("staging_buf_output_pts is None")?
-            .read()?;
-        let output_points: Vec<[f32; 3]> = out_pts_content
-            .chunks_exact(3)
-            .take(num_output_points)
-            .map(|chunk| -> Result<[f32; 3]> {
-                chunk.try_into().context("Failed to map for output points")
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let output_points = if read_back_pts {
+            let out_pts_content = self
+                .staging_buf_output_pts
+                .as_ref()
+                .context("staging_buf_output_pts is None")?
+                .read()?;
+            out_pts_content
+                .chunks_exact(3)
+                .take(num_output_points)
+                .map(|chunk| -> Result<[f32; 3]> {
+                    chunk.try_into().context("Failed to map for output points")
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            vec![]
+        };
 
-        self.h_downsampled_pts = Some(output_points.clone());
+        self.h_downsampled_pts = if read_back_pts {
+            Some(output_points.clone())
+        } else {
+            None
+        };
         self.h_downsampled_pts_num = num_output_points;
 
         Ok(output_points)
+    }
+
+    pub fn voxelization(
+        &mut self,
+        data_on_gpu: &GpuTransferDataContext,
+        voxel_size: f32,
+    ) -> Result<Vec<[f32; 3]>> {
+        self.voxelization_impl(data_on_gpu, voxel_size, true)
+    }
+
+    pub fn voxelization_gpu_only(
+        &mut self,
+        data_on_gpu: &GpuTransferDataContext,
+        voxel_size: f32,
+    ) -> Result<()> {
+        self.voxelization_impl(data_on_gpu, voxel_size, false)?;
+        Ok(())
     }
 }
