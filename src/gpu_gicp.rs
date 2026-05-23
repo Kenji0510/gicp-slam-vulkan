@@ -13,6 +13,7 @@ use vulkano::{
         ComputePipeline, Pipeline, PipelineLayout, PipelineShaderStageCreateInfo,
         compute::ComputePipelineCreateInfo, layout::PipelineDescriptorSetLayoutCreateInfo,
     },
+    shader::{ShaderModule, ShaderModuleCreateInfo},
     sync::{self, GpuFuture},
 };
 
@@ -51,15 +52,15 @@ pub struct GicpGpuContext {
 
 impl GicpGpuContext {
     pub fn new(vulkan_context: VulkanContext) -> Result<Self> {
-        mod cs_icp {
-            vulkano_shaders::shader! {
-                ty: "compute",
-                path: "src/kernels/gicp/gicp.glsl",
-            }
+        let shader_icp = unsafe {
+            ShaderModule::new(
+                vulkan_context.device.clone(),
+                ShaderModuleCreateInfo::new(&bytemuck::pod_collect_to_vec::<u8, u32>(
+                    include_bytes!(concat!(env!("OUT_DIR"), "/shaders/gicp.spv")),
+                )),
+            )
         }
-
-        let shader_icp =
-            cs_icp::load(vulkan_context.device.clone()).context("Failed to load ICP shader")?;
+        .context("Failed to load ICP shader")?;
 
         let cs_icp = shader_icp
             .entry_point("main")

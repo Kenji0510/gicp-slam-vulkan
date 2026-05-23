@@ -12,7 +12,7 @@ use vulkano::{
         ComputePipeline, Pipeline, PipelineLayout, PipelineShaderStageCreateInfo,
         compute::ComputePipelineCreateInfo, layout::PipelineDescriptorSetLayoutCreateInfo,
     },
-    shader::SpecializationConstant,
+    shader::{ShaderModule, ShaderModuleCreateInfo, SpecializationConstant},
     sync::{self, GpuFuture},
 };
 
@@ -48,15 +48,15 @@ pub struct CovarianceGpuContext {
 
 impl CovarianceGpuContext {
     pub fn new(vulkan_context: VulkanContext) -> Result<Self> {
-        mod cs_normals {
-            vulkano_shaders::shader! {
-                ty: "compute",
-                path: "src/kernels/covariances/covariance.glsl",
-            }
+        let shader_normals = unsafe {
+            ShaderModule::new(
+                vulkan_context.device.clone(),
+                ShaderModuleCreateInfo::new(&bytemuck::pod_collect_to_vec::<u8, u32>(
+                    include_bytes!(concat!(env!("OUT_DIR"), "/shaders/covariance.spv")),
+                )),
+            )
         }
-
-        let shader_normals = cs_normals::load(vulkan_context.device.clone())
-            .context("Failed to load normals shader")?;
+        .context("Failed to load normals shader")?;
 
         let mut spec = HashMap::new();
         spec.insert(0u32, SpecializationConstant::U32(K_NEIGHBORS as u32));

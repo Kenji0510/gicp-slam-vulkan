@@ -11,6 +11,7 @@ use vulkano::{
         ComputePipeline, Pipeline, PipelineLayout, PipelineShaderStageCreateInfo,
         compute::ComputePipelineCreateInfo, layout::PipelineDescriptorSetLayoutCreateInfo,
     },
+    shader::{ShaderModule, ShaderModuleCreateInfo},
     sync::{self, GpuFuture},
 };
 
@@ -58,15 +59,15 @@ pub struct TransformGpuContext {
 
 impl TransformGpuContext {
     pub fn new(vulkan_context: VulkanContext) -> Result<Self> {
-        mod cs_transform {
-            vulkano_shaders::shader! {
-                ty: "compute",
-                path: "src/kernels/transform/transform.glsl",
-            }
+        let shader_transform = unsafe {
+            ShaderModule::new(
+                vulkan_context.device.clone(),
+                ShaderModuleCreateInfo::new(&bytemuck::pod_collect_to_vec::<u8, u32>(
+                    include_bytes!(concat!(env!("OUT_DIR"), "/shaders/transform.spv")),
+                )),
+            )
         }
-
-        let shader_transform = cs_transform::load(vulkan_context.device.clone())
-            .context("Failed to load transform shader")?;
+        .context("Failed to load transform shader")?;
 
         let cs_transform = shader_transform
             .entry_point("main")

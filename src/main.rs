@@ -26,7 +26,7 @@ use gicp_slam_vulkan::{
 use nalgebra::{Matrix4, Point3, Quaternion, UnitQuaternion, Vector3};
 
 const LOAD_DIR: &str = "data/input/05172026/park01";
-const SAVE_DIR: &str = "data/output/05212026/debug";
+const SAVE_DIR: &str = "data/output/05222026/debug";
 
 const DOWNSAMPLE_VOXEL_SIZE: f32 = 0.2; // m
 const GICP_ITERATIONS: usize = 5;
@@ -34,7 +34,7 @@ const GICP_ITERATIONS: usize = 5;
 const MIN_DIST: f32 = 0.1;
 const MAX_DIST: f32 = 45.0;
 
-const MAX_POINTS_PER_VOXEL: usize = 10;
+const MAX_POINTS_PER_VOXEL: usize = 30;
 const MIN_POINTS_PER_VOXEL: usize = 3;
 
 const LOCAL_MAP_MAX_FRAMES: usize = 25;
@@ -42,6 +42,10 @@ const LOCAL_MAP_MAX_DISTANCE: f32 = 20.0;
 
 const SEARCH_RANGE: i32 = 2; // Range of 7x7x7 voxels
 const MAX_DIST_SQ: f32 = 1.0; // Optional maximum distance squared
+
+/// LocalMap のハッシュグリッドセルサイズ。
+/// downsample_voxel_size とは独立に設定する。大きいほど query が高速。
+const LOCAL_MAP_INDEX_VOXEL_SIZE: f32 = 0.35;
 
 // IMU coordination to LiDAR coordination (Robosense 96 beam)
 // Quaternion (x, y, z, w): -0.705437, 0.708767, -0.00246579, 0.00097028
@@ -143,7 +147,7 @@ fn main() -> Result<()> {
     // --- Build local voxel map (sliding window) ---
     let downsampled_points = convert_vec_to_point3(&downsampled_points_vec);
     let mut global_voxel_map = LocalMap::new(LocalMapConfig {
-        voxel_size: downsample_voxel_size,
+        index_voxel_size: LOCAL_MAP_INDEX_VOXEL_SIZE,
         max_points_per_voxel: MAX_POINTS_PER_VOXEL,
         min_points_per_voxel: MIN_POINTS_PER_VOXEL,
         max_frames: usize::MAX,      // No limit on frames for global map
@@ -152,7 +156,7 @@ fn main() -> Result<()> {
     global_voxel_map.insert_frame(&downsampled_points, Point3::origin());
 
     let mut local_voxel_map = LocalMap::new(LocalMapConfig {
-        voxel_size: downsample_voxel_size,
+        index_voxel_size: LOCAL_MAP_INDEX_VOXEL_SIZE,
         max_points_per_voxel: MAX_POINTS_PER_VOXEL,
         min_points_per_voxel: MIN_POINTS_PER_VOXEL,
         max_frames: LOCAL_MAP_MAX_FRAMES,

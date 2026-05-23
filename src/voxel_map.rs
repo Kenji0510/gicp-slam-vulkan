@@ -1,7 +1,6 @@
 use std::collections::VecDeque;
 
 use nalgebra::{Matrix3, Point3, Vector3};
-use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -18,19 +17,14 @@ pub struct VoxelKey {
 #[derive(Debug, Clone)]
 pub struct VoxelCell {
     /// このvoxel内に入った代表点。
-    /// 初期段階ではデバッグ性を優先して保持する。
-    /// 将来的には Welford の count / mean / m2 のみへ移行可能。
     /// タプルの 2 要素目はフレーム ID。
     pub points: Vec<(Point3<f32>, u64)>,
 
+    /// 座標の累積和（インクリメンタルな平均計算用）。
+    sum: Vector3<f32>,
+
     /// Gaussianの平均 μ。
     pub mean: Point3<f32>,
-
-    /// voxel内点群から直接計算した共分散。
-    // pub raw_covariance: Matrix3<f32>,
-
-    // /// 固有値clamp後の安定化済みGaussian共分散 Σ。
-    // pub covariance: Matrix3<f32>,
 
     /// Gaussianとしてregistrationに使えるだけの点数と数値安定性があるか。
     pub valid: bool,
@@ -42,9 +36,8 @@ impl VoxelCell {
     pub fn new() -> Self {
         Self {
             points: Vec::new(),
+            sum: Vector3::zeros(),
             mean: Point3::new(0.0, 0.0, 0.0),
-            // raw_covariance: Matrix3::identity(),
-            // covariance: Matrix3::identity(),
             valid: false,
             voxel_key: VoxelKey {
                 ix: 0,
@@ -67,16 +60,35 @@ impl VoxelCell {
         if self.points.len() >= max_points_per_gaussian {
             return false;
         }
+        self.sum += p.coords;
         self.points.push((p, frame_id));
+        // O(1) でインクリメンタルに mean を更新
+        self.mean = Point3::from(self.sum / self.points.len() as f32);
         true
     }
 
-    pub fn compute_average(&self) -> Point3<f32> {
-        let mut sum = Vector3::zeros();
-        for (p, _) in &self.points {
-            sum += p.coords;
+    /// 指定フレームの点を除去し、sum と mean を O(1) で更新する。
+    /// 戻り値: 除去後に点が残っているか
+    fn remove_frame_points(&mut self, frame_id: u64, min_points: usize) -> bool {
+        let mut removed_sum = Vector3::zeros();
+        self.points.retain(|(p, fid)| {
+            if *fid == frame_id {
+                removed_sum += p.coords;
+                false
+            } else {
+                true
+            }
+        });
+        self.sum -= removed_sum;
+        let n = self.points.len();
+        if n == 0 {
+            self.mean = Point3::new(0.0, 0.0, 0.0);
+            self.valid = false;
+        } else {
+            self.mean = Point3::from(self.sum / n as f32);
+            self.valid = n >= min_points;
         }
-        Point3::from(sum / self.points.len() as f32)
+        n > 0
     }
 
     pub fn compute_covariance(cell: &VoxelCell) {}
@@ -223,10 +235,7 @@ pub fn build_gicp_voxel_map(
         cell.push_point(p, 0, max_points_per_voxel);
     }
 
-    // Mean (parallel)
-    voxel_map.par_iter_mut().for_each(|(_, cell)| {
-        cell.mean = cell.compute_average();
-    });
+    // Mean は push_point 内で O(1) 更新済みのため、事後計算は不要。
 
     // Covariance: 近傍voxelの平均を収集して共分散を一括並列計算
     // let updates: Vec<(VoxelKey, Matrix3<f32>, Matrix3<f32>)> = voxel_map
@@ -262,7 +271,11 @@ pub fn build_gicp_voxel_map(
 // ---------------------------------------------------------------------------
 
 pub struct LocalMapConfig {
-    pub voxel_size: f32,
+    /// ハッシュグリッドのセルサイズ [m]。
+    /// query_points_within_radius のハッシュルックアップ数 = (2*ceil(radius/index_voxel_size)+1)³ を決定する。
+    /// データの精度（downsample_voxel_size）とは独立に設定できる。
+    /// 大きいほどクエリが速く、小さいほどセルあたりの点数が減る。
+    pub index_voxel_size: f32,
     pub max_points_per_voxel: usize,
     pub min_points_per_voxel: usize,
     /// フレーム数ベースの追い出し上限。
@@ -310,7 +323,7 @@ impl LocalMap {
         let mut dirty_keys = FxHashSet::default();
 
         for &p in points {
-            let key = voxel_key(&p, self.config.voxel_size);
+            let key = voxel_key(&p, self.config.index_voxel_size);
             let cell = self.voxel_map.entry(key).or_insert_with(VoxelCell::new);
             if cell.push_point(p, frame_id, self.config.max_points_per_voxel) {
                 dirty_keys.insert(key);
@@ -319,7 +332,7 @@ impl LocalMap {
 
         for &key in &dirty_keys {
             if let Some(cell) = self.voxel_map.get_mut(&key) {
-                cell.mean = cell.compute_average();
+                // mean は push_point 内で O(1) 更新済み。valid だけ設定する。
                 cell.valid = cell.points.len() >= self.config.min_points_per_voxel;
             }
         }
@@ -373,12 +386,10 @@ impl LocalMap {
 
         for &key in &entry.dirty_keys {
             if let Some(cell) = self.voxel_map.get_mut(&key) {
-                cell.points.retain(|(_, fid)| *fid != entry.frame_id);
-                if cell.points.is_empty() {
+                let has_points =
+                    cell.remove_frame_points(entry.frame_id, self.config.min_points_per_voxel);
+                if !has_points {
                     to_remove.push(key);
-                } else {
-                    cell.mean = cell.compute_average();
-                    cell.valid = cell.points.len() >= self.config.min_points_per_voxel;
                 }
             }
         }
@@ -397,7 +408,7 @@ impl LocalMap {
         center: &Point3<f32>,
         radius: f32,
     ) -> Vec<Point3<f32>> {
-        let vs = self.config.voxel_size;
+        let vs = self.config.index_voxel_size;
         let r_sq = radius * radius;
 
         // 半径をカバーする voxel 範囲を整数グリッドで計算

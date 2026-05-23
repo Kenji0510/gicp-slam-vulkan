@@ -4,7 +4,7 @@ use foldhash::{HashMap, HashMapExt};
 
 use anyhow::{Context, Result};
 use log::debug;
-use vulkano::shader::SpecializationConstant;
+use vulkano::shader::{ShaderModule, ShaderModuleCreateInfo, SpecializationConstant};
 use vulkano::{
     buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer},
     command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage},
@@ -45,15 +45,15 @@ pub struct KnnSearchGpuContext {
 
 impl KnnSearchGpuContext {
     pub fn new(vulkan_context: VulkanContext) -> Result<Self> {
-        mod cs_search {
-            vulkano_shaders::shader! {
-                ty: "compute",
-                path: "src/kernels/knn_search/knn_search.glsl",
-            }
+        let shader_search = unsafe {
+            ShaderModule::new(
+                vulkan_context.device.clone(),
+                ShaderModuleCreateInfo::new(&bytemuck::pod_collect_to_vec::<u8, u32>(
+                    include_bytes!(concat!(env!("OUT_DIR"), "/shaders/knn_search.spv")),
+                )),
+            )
         }
-
-        let shader_search = cs_search::load(vulkan_context.device.clone())
-            .context("Failed to load search shader")?;
+        .context("Failed to load search shader")?;
 
         let mut spec = HashMap::new();
         spec.insert(0u32, SpecializationConstant::U32(K_NEIGHBORS as u32));

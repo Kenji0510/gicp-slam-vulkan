@@ -11,6 +11,7 @@ use vulkano::{
         ComputePipeline, Pipeline, PipelineLayout, PipelineShaderStageCreateInfo,
         compute::ComputePipelineCreateInfo, layout::PipelineDescriptorSetLayoutCreateInfo,
     },
+    shader::{ShaderModule, ShaderModuleCreateInfo},
     sync::{self, GpuFuture},
 };
 
@@ -51,15 +52,15 @@ pub struct SearchGpuContext {
 
 impl SearchGpuContext {
     pub fn new(vulkan_context: VulkanContext) -> Result<Self> {
-        mod cs_search {
-            vulkano_shaders::shader! {
-                ty: "compute",
-                path: "src/kernels/search_neighbor/search.glsl",
-            }
+        let shader_search = unsafe {
+            ShaderModule::new(
+                vulkan_context.device.clone(),
+                ShaderModuleCreateInfo::new(&bytemuck::pod_collect_to_vec::<u8, u32>(
+                    include_bytes!(concat!(env!("OUT_DIR"), "/shaders/search_neighbor.spv")),
+                )),
+            )
         }
-
-        let shader_search = cs_search::load(vulkan_context.device.clone())
-            .context("Failed to load search shader")?;
+        .context("Failed to load search shader")?;
 
         let cs_search = shader_search
             .entry_point("main")

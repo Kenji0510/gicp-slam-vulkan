@@ -11,6 +11,7 @@ use vulkano::{
         ComputePipeline, Pipeline, PipelineLayout, PipelineShaderStageCreateInfo,
         compute::ComputePipelineCreateInfo, layout::PipelineDescriptorSetLayoutCreateInfo,
     },
+    shader::{ShaderModule, ShaderModuleCreateInfo},
     sync::{self, GpuFuture},
 };
 
@@ -63,33 +64,33 @@ pub struct VoxelGpuContext {
 
 impl VoxelGpuContext {
     pub fn new(vulkan_context: VulkanContext) -> Result<Self> {
-        mod cs_init {
-            vulkano_shaders::shader! {
-                ty: "compute",
-                path: "src/kernels/voxelization/init.glsl",
-            }
+        let shader_init = unsafe {
+            ShaderModule::new(
+                vulkan_context.device.clone(),
+                ShaderModuleCreateInfo::new(&bytemuck::pod_collect_to_vec::<u8, u32>(
+                    include_bytes!(concat!(env!("OUT_DIR"), "/shaders/voxel_init.spv")),
+                )),
+            )
         }
-
-        mod cs_insert {
-            vulkano_shaders::shader! {
-                ty: "compute",
-                path: "src/kernels/voxelization/insert.glsl",
-            }
+        .context("Failed to load init shader")?;
+        let shader_insert = unsafe {
+            ShaderModule::new(
+                vulkan_context.device.clone(),
+                ShaderModuleCreateInfo::new(&bytemuck::pod_collect_to_vec::<u8, u32>(
+                    include_bytes!(concat!(env!("OUT_DIR"), "/shaders/voxel_insert.spv")),
+                )),
+            )
         }
-
-        mod cs_compact {
-            vulkano_shaders::shader! {
-                ty: "compute",
-                path: "src/kernels/voxelization/compact.glsl",
-            }
+        .context("Failed to load insert shader")?;
+        let shader_compact = unsafe {
+            ShaderModule::new(
+                vulkan_context.device.clone(),
+                ShaderModuleCreateInfo::new(&bytemuck::pod_collect_to_vec::<u8, u32>(
+                    include_bytes!(concat!(env!("OUT_DIR"), "/shaders/voxel_compact.spv")),
+                )),
+            )
         }
-
-        let shader_init =
-            cs_init::load(vulkan_context.device.clone()).context("Failed to load init shader")?;
-        let shader_insert = cs_insert::load(vulkan_context.device.clone())
-            .context("Failed to load insert shader")?;
-        let shader_compact = cs_compact::load(vulkan_context.device.clone())
-            .context("Failed to load compact shader")?;
+        .context("Failed to load compact shader")?;;
 
         let cs_init = shader_init
             .entry_point("main")
