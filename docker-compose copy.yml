@@ -1,3 +1,5 @@
+version: '3.8'
+
 services:
   slam-vulkan:
     build: .
@@ -5,26 +7,23 @@ services:
     tty: true
     stdin_open: true
     environment:
-      # NVIDIA環境の時にだけ牙を向く設定（他社GPU環境では無視されます）
-      - NVIDIA_DRIVER_CAPABILITIES=compute,graphics,utility
+      - NVIDIA_DRIVER_CAPABILITIES=compute,graphics,utility,display
       - NVIDIA_VISIBLE_DEVICES=all
+      # - VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json
       - RUST_BACKTRACE=1
     volumes:
       - .:/workspace
+      # コンテナ内のビルドキャッシュをホストと分離（ビルドエラー防止）
       - cargo_target:/workspace/target
-    
-    # 【最重要】AMDとIntel GPUは、このDRIデバイスを経由してダイレクトにVulkanを叩きます
     devices:
       - /dev/dri:/dev/dri
-    
-    # NVIDIA環境のPCで動かす時だけ、このdeployセクションが有効に働きます
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
               count: all
-              capabilities: [gpu, compute, graphics, utility]
+              capabilities: [gpu, compute, utility, graphics]
 
 volumes:
   cargo_target:
