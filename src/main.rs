@@ -25,27 +25,30 @@ use gicp_slam_vulkan::{
 };
 use nalgebra::{Matrix4, Point3, Quaternion, UnitQuaternion, Vector3};
 
-const LOAD_DIR: &str = "data/input/05242026/path04";
+const LOAD_DIR: &str = "data/input/05242026/path03";
 const SAVE_DIR: &str = "data/output/05242026/debug";
 
 const DOWNSAMPLE_VOXEL_SIZE: f32 = 0.2; // m
 const GICP_ITERATIONS: usize = 5;  // Default: 5
 
 const MIN_DIST: f32 = 0.1;
-const MAX_DIST: f32 = 30.0;
+const MAX_DIST: f32 = 20.0;
 
-const MAX_POINTS_PER_VOXEL: usize = 60;
+const MAX_POINTS_PER_VOXEL: usize = 50;
 const MIN_POINTS_PER_VOXEL: usize = 3;
 
-const LOCAL_MAP_MAX_FRAMES: usize = 30;
-const LOCAL_MAP_MAX_DISTANCE: f32 = 30.0;
+const LOCAL_MAP_MAX_FRAMES: usize = 60;
+const LOCAL_MAP_MAX_DISTANCE: f32 = 20.0;
 
-const SEARCH_RANGE: i32 = 3; // Range of 5x5x5 voxels
-const MAX_DIST_SQ: f32 = 0.12; // Optional maximum distance squared
+const SEARCH_RANGE: i32 = 3; // Range of 7x7x7 voxels
+const MAX_DIST_SQ: f32 = 0.09; // Optional maximum distance squared
+
+/// dist_sq <= MAX_DIST_SQ を満たす点の割合がこの値を下回るフレームはGICPをスキップする（0.0 で無効）
+const MIN_MATCH_RATIO: f32 = 0.65;
 
 /// LocalMap のハッシュグリッドセルサイズ。
 /// downsample_voxel_size とは独立に設定する。大きいほど query が高速。
-const LOCAL_MAP_INDEX_VOXEL_SIZE: f32 = 0.5;
+const LOCAL_MAP_INDEX_VOXEL_SIZE: f32 = 0.25;
 
 // IMU coordination to LiDAR coordination (Robosense 96 beam)
 // Quaternion (x, y, z, w): -0.705437, 0.708767, -0.00246579, 0.00097028
@@ -295,8 +298,9 @@ fn main() -> Result<()> {
 
         // --- GICP optimization iterations ---
         let gicp_start = Instant::now();
-        for i in 0..GICP_ITERATIONS {
-            log::info!("GICP iteration {}/{}", i + 1, GICP_ITERATIONS);
+        let mut frame_valid = true;
+        'gicp: for gicp_iter in 0..GICP_ITERATIONS {
+            log::info!("GICP iteration {}/{}", gicp_iter + 1, GICP_ITERATIONS);
 
             let m = current_transform;
             let mut transform_params = gpu_transform::TransformParams {
@@ -334,7 +338,7 @@ fn main() -> Result<()> {
 
             // --- Search neighbor points for each point ---
             let start_search_neighbor = Instant::now();
-            search_neighbor_gpu_context.search_neighbor(
+            let (_h_neighbor_indices, h_neighbor_dists_sq) = search_neighbor_gpu_context.search_neighbor(
                 &transform_gpu_context,
                 source_voxel_gpu_context.h_downsampled_pts_num,
                 &target_voxel_gpu_context,
@@ -350,6 +354,29 @@ fn main() -> Result<()> {
                 "Neighbor search completed in {:.2} ms",
                 performance_logs.find_neighbors_time_ms.last().unwrap()
             );
+
+            // --- Check match ratio on first iteration ---
+            if gicp_iter == 0 {
+                let total = h_neighbor_dists_sq.len();
+                let valid_count = h_neighbor_dists_sq
+                    .iter()
+                    .filter(|&&d| d >= 0.0 && d <= MAX_DIST_SQ)
+                    .count();
+                let ratio = if total > 0 { valid_count as f32 / total as f32 } else { 0.0 };
+                log::debug!("Match ratio (dist <= {:.3}): {:.1}% ({}/{})", MAX_DIST_SQ, ratio * 100.0, valid_count, total);
+                if ratio < MIN_MATCH_RATIO {
+                    log::warn!(
+                        "Frame skipped: match ratio {:.1}% < {:.1}% threshold ({}/{})",
+                        ratio * 100.0,
+                        MIN_MATCH_RATIO * 100.0,
+                        valid_count,
+                        total
+                    );
+                    frame_valid = false;
+                    break 'gicp;
+                }
+            }
+            // --- Check match ratio on first iteration ---
             // --- Search neighbor points for each point ---
 
             // --- GICP optimization ---
@@ -390,7 +417,7 @@ fn main() -> Result<()> {
                 .push(gicp_iteration_duration.as_secs_f32() * 1000.0);
             log::debug!(
                 "GICP iteration {} completed in {:.2} ms",
-                i + 1,
+                gicp_iter + 1,
                 performance_logs.each_gicp_time_ms.last().unwrap()
             );
 
@@ -410,6 +437,11 @@ fn main() -> Result<()> {
             performance_logs.total_gicp_time_ms.last().unwrap()
         );
         // --- GICP optimization iterations ---
+
+        if !frame_valid {
+            prev_frame_start_time = current_frame_start_time;
+            continue;
+        }
 
         // --- Update local map ---
         let t = current_transform.column(3);
@@ -523,16 +555,56 @@ fn main() -> Result<()> {
 
     // --- Save final local map for visualization ---
     let final_global_map_points_vec = convert_point3_to_vec(&global_voxel_map.get_all_points());
+
+    // --- CPU voxelization of final global map ---
+    let voxel_size = 0.25;
+    let inv_voxel_size = 1.0 / voxel_size;
+    let mut voxel_map: std::collections::HashMap<(i64, i64, i64), ([f64; 3], usize)> =
+        std::collections::HashMap::new();
+    for p in &final_global_map_points_vec {
+        let key = (
+            (p[0] as f64 * inv_voxel_size as f64).floor() as i64,
+            (p[1] as f64 * inv_voxel_size as f64).floor() as i64,
+            (p[2] as f64 * inv_voxel_size as f64).floor() as i64,
+        );
+        let entry = voxel_map.entry(key).or_insert(([0.0; 3], 0));
+        entry.0[0] += p[0] as f64;
+        entry.0[1] += p[1] as f64;
+        entry.0[2] += p[2] as f64;
+        entry.1 += 1;
+    }
+    let downsampled_global_map_points_vec: Vec<[f32; 3]> = voxel_map
+        .values()
+        .map(|(sum, count)| {
+            let n = *count as f64;
+            [(sum[0] / n) as f32, (sum[1] / n) as f32, (sum[2] / n) as f32]
+        })
+        .collect();
+    log::info!(
+        "CPU voxelization: {} -> {} points",
+        final_global_map_points_vec.len(),
+        downsampled_global_map_points_vec.len()
+    );
+    // --- CPU voxelization of final global map ---
+
     // let final_local_map_points = convert_vec_to_point3(&final_local_map_points_vec);
     let save_path = format!(
         "{}/final_global_map_v-{}.pcd",
         SAVE_DIR, DOWNSAMPLE_VOXEL_SIZE
     );
+    // save_pcd_xyzit(
+    //     &convert_vec_to_xyz(&final_global_map_points_vec),
+    //     &save_path,
+    // )?;
+    // --- Save final local map for visualization ---
+    let save_path = format!(
+        "{}/final_global_map_v-{}.pcd",
+        SAVE_DIR, voxel_size
+    );
     save_pcd_xyzit(
-        &convert_vec_to_xyz(&final_global_map_points_vec),
+        &convert_vec_to_xyz(&downsampled_global_map_points_vec),
         &save_path,
     )?;
-    // --- Save final local map for visualization ---
 
     Ok(())
 }
