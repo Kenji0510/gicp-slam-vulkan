@@ -25,27 +25,27 @@ use gicp_slam_vulkan::{
 };
 use nalgebra::{Matrix4, Point3, Quaternion, UnitQuaternion, Vector3};
 
-const LOAD_DIR: &str = "data/input/05172026/park01";
-const SAVE_DIR: &str = "data/output/05222026/debug";
+const LOAD_DIR: &str = "data/input/05242026/path04";
+const SAVE_DIR: &str = "data/output/05242026/debug";
 
 const DOWNSAMPLE_VOXEL_SIZE: f32 = 0.2; // m
-const GICP_ITERATIONS: usize = 3;  // Default: 5
+const GICP_ITERATIONS: usize = 5;  // Default: 5
 
 const MIN_DIST: f32 = 0.1;
-const MAX_DIST: f32 = 45.0;
+const MAX_DIST: f32 = 30.0;
 
 const MAX_POINTS_PER_VOXEL: usize = 60;
 const MIN_POINTS_PER_VOXEL: usize = 3;
 
-const LOCAL_MAP_MAX_FRAMES: usize = 25;
-const LOCAL_MAP_MAX_DISTANCE: f32 = 20.0;
+const LOCAL_MAP_MAX_FRAMES: usize = 30;
+const LOCAL_MAP_MAX_DISTANCE: f32 = 30.0;
 
-const SEARCH_RANGE: i32 = 2; // Range of 5x5x5 voxels
-const MAX_DIST_SQ: f32 = 1.0; // Optional maximum distance squared
+const SEARCH_RANGE: i32 = 3; // Range of 5x5x5 voxels
+const MAX_DIST_SQ: f32 = 0.12; // Optional maximum distance squared
 
 /// LocalMap のハッシュグリッドセルサイズ。
 /// downsample_voxel_size とは独立に設定する。大きいほど query が高速。
-const LOCAL_MAP_INDEX_VOXEL_SIZE: f32 = 1.0;
+const LOCAL_MAP_INDEX_VOXEL_SIZE: f32 = 0.5;
 
 // IMU coordination to LiDAR coordination (Robosense 96 beam)
 // Quaternion (x, y, z, w): -0.705437, 0.708767, -0.00246579, 0.00097028
