@@ -90,7 +90,7 @@ impl VoxelGpuContext {
                 )),
             )
         }
-        .context("Failed to load compact shader")?;;
+        .context("Failed to load compact shader")?;
 
         let cs_init = shader_init
             .entry_point("main")

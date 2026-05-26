@@ -1,7 +1,6 @@
 use nalgebra::{Isometry3, Matrix4, Point3, Translation3, UnitQuaternion};
 use serde::{Deserialize, Serialize};
 
-
 pub type SubmapId = u64;
 pub type FrameId = u64;
 
@@ -57,11 +56,7 @@ pub struct SubmapBuilder {
 }
 
 impl SubmapBuilder {
-    pub fn new(
-        id: SubmapId,
-        start_frame_id: FrameId,
-        anchor_pose_world: Isometry3<f64>,
-    ) -> Self {
+    pub fn new(id: SubmapId, start_frame_id: FrameId, anchor_pose_world: Isometry3<f64>) -> Self {
         Self {
             id,
             start_frame_id,
@@ -185,11 +180,7 @@ impl SubmapManager {
             let id = self.next_submap_id;
             self.next_submap_id += 1;
 
-            self.active = Some(SubmapBuilder::new(
-                id,
-                frame_id,
-                frame_pose_world,
-            ));
+            self.active = Some(SubmapBuilder::new(id, frame_id, frame_pose_world));
         }
 
         let active = self.active.as_mut().unwrap();

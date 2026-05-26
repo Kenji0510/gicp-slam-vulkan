@@ -5,10 +5,25 @@ use gicp_slam_vulkan::{
     convert_type::{
         convert_pcd_to_xyz, convert_point3_to_vec, convert_vec_point_cov_to_pcd_xyzcov,
         convert_vec_to_point3, convert_vec_to_xyz, convert_xyz_to_vec,
-    }, deskew_points::deskew_points, file_handler::{
+    },
+    deskew_points::deskew_points,
+    file_handler::{
         load_imu_data, load_pcd_files, load_pcd_xyzit, save_pcd_xyzcov, save_pcd_xyzit,
         save_pcd_xyznormal,
-    }, gpu_copy::GpuTransferDataContext, gpu_covariances::{self, combine_pts_with_normals}, gpu_gicp::{GicpGpuContext, GicpStaticBuffers, solve_gicp}, gpu_knn_search, gpu_search_neighbor::SearchGpuContext, gpu_transform, gpu_voxel::VoxelGpuContext, init_gpu::VulkanContext, log_performance::PerformanceLogs, predict_pose_by_imu::{align_imu_timestamps, build_rotation_trajectory, predict_pose_by_imu}, submap::{SubmapConfig, SubmapManager, matrix4_to_isometry3, transform_submap_points_to_world}, voxel_map::{LocalMap, LocalMapConfig}
+    },
+    gpu_copy::GpuTransferDataContext,
+    gpu_covariances::{self, combine_pts_with_normals},
+    gpu_gicp::{GicpGpuContext, GicpStaticBuffers, solve_gicp},
+    gpu_knn_search,
+    gpu_search_neighbor::SearchGpuContext,
+    gpu_transform,
+    gpu_voxel::VoxelGpuContext,
+    init_gpu::VulkanContext,
+    log_performance::PerformanceLogs,
+    loop_closure::{LoopCandidateConfig, LoopCandidateFinder},
+    predict_pose_by_imu::{align_imu_timestamps, build_rotation_trajectory, predict_pose_by_imu},
+    submap::{SubmapConfig, SubmapManager, matrix4_to_isometry3, transform_submap_points_to_world},
+    voxel_map::{LocalMap, LocalMapConfig},
 };
 use nalgebra::{Matrix4, Point3, Quaternion, UnitQuaternion, Vector3};
 
@@ -16,7 +31,7 @@ const LOAD_DIR: &str = "data/input/05242026/path03";
 const SAVE_DIR: &str = "data/output/05242026/debug";
 
 const DOWNSAMPLE_VOXEL_SIZE: f32 = 0.2; // m
-const GICP_ITERATIONS: usize = 5;  // Default: 5
+const GICP_ITERATIONS: usize = 5; // Default: 5
 
 const MIN_DIST: f32 = 0.1;
 const MAX_DIST: f32 = 20.0;
@@ -40,6 +55,12 @@ const LOCAL_MAP_INDEX_VOXEL_SIZE: f32 = 0.25;
 const SUBMAP_MAX_FRAMES: usize = 30;
 const SUBMAP_MAX_DISTANCE: f32 = 5.0;
 const SUBMAP_MAX_POINTS: usize = 300_000;
+
+const MIN_SUBMAP_SEPARATION: u64 = 10;
+const SEARCH_RADIUS: f32 = 5.0;
+const MAX_CANDIDATES: usize = 5;
+const TARGET_NEIGHBOR_COUNT: u64 = 2;
+const USE_XY_DISTANCE: bool = true;
 
 // IMU coordination to LiDAR coordination (Robosense 96 beam)
 // Quaternion (x, y, z, w): -0.705437, 0.708767, -0.00246579, 0.00097028
@@ -95,6 +116,14 @@ fn main() -> Result<()> {
         max_frames_per_submap: SUBMAP_MAX_FRAMES,
         max_distance_per_submap: SUBMAP_MAX_DISTANCE,
         max_points_per_submap: SUBMAP_MAX_POINTS,
+    });
+
+    let loop_candidate_finder = LoopCandidateFinder::new(LoopCandidateConfig {
+        min_submap_separation: MIN_SUBMAP_SEPARATION,
+        search_radius: SEARCH_RADIUS,
+        max_candidates: MAX_CANDIDATES,
+        target_neighbor_count: TARGET_NEIGHBOR_COUNT,
+        use_xy_distance: USE_XY_DISTANCE,
     });
 
     let pcd_dir = format!("{}/pcd", LOAD_DIR);
@@ -167,12 +196,7 @@ fn main() -> Result<()> {
 
     let init_pose = matrix4_to_isometry3(&Matrix4::<f64>::identity());
 
-    submap_manager.insert_frame(
-        0,
-        init_pose,
-        &downsampled_points,
-        &downsampled_points,
-    );
+    submap_manager.insert_frame(0, init_pose, &downsampled_points, &downsampled_points);
 
     let mut prev_frame_start_time = pcd
         .iter()
@@ -254,7 +278,7 @@ fn main() -> Result<()> {
         let downsampled_source_points_vec = source_voxel_gpu_context
             .voxelization(&copy_source_gpu_context, downsample_voxel_size)?;
         target_voxel_gpu_context
-            .voxelization_gpu_only(&copy_target_gpu_context, downsample_voxel_size)?;;
+            .voxelization_gpu_only(&copy_target_gpu_context, downsample_voxel_size)?;
         let duration = start.elapsed();
         performance_logs
             .voxelization_time_ms
@@ -344,14 +368,15 @@ fn main() -> Result<()> {
 
             // --- Search neighbor points for each point ---
             let start_search_neighbor = Instant::now();
-            let (_h_neighbor_indices, h_neighbor_dists_sq) = search_neighbor_gpu_context.search_neighbor(
-                &transform_gpu_context,
-                source_voxel_gpu_context.h_downsampled_pts_num,
-                &target_voxel_gpu_context,
-                target_voxel_gpu_context.h_downsampled_pts_num,
-                SEARCH_RANGE,
-                MAX_DIST_SQ,
-            )?;
+            let (_h_neighbor_indices, h_neighbor_dists_sq) = search_neighbor_gpu_context
+                .search_neighbor(
+                    &transform_gpu_context,
+                    source_voxel_gpu_context.h_downsampled_pts_num,
+                    &target_voxel_gpu_context,
+                    target_voxel_gpu_context.h_downsampled_pts_num,
+                    SEARCH_RANGE,
+                    MAX_DIST_SQ,
+                )?;
             let duration_search_neighbor = start_search_neighbor.elapsed();
             performance_logs
                 .find_neighbors_time_ms
@@ -368,8 +393,18 @@ fn main() -> Result<()> {
                     .iter()
                     .filter(|&&d| d >= 0.0 && d <= MAX_DIST_SQ)
                     .count();
-                let ratio = if total > 0 { valid_count as f32 / total as f32 } else { 0.0 };
-                log::debug!("Match ratio (dist <= {:.3}): {:.1}% ({}/{})", MAX_DIST_SQ, ratio * 100.0, valid_count, total);
+                let ratio = if total > 0 {
+                    valid_count as f32 / total as f32
+                } else {
+                    0.0
+                };
+                log::debug!(
+                    "Match ratio (dist <= {:.3}): {:.1}% ({}/{})",
+                    MAX_DIST_SQ,
+                    ratio * 100.0,
+                    valid_count,
+                    total
+                );
                 if ratio < MIN_MATCH_RATIO {
                     log::warn!(
                         "Frame skipped: match ratio {:.1}% < {:.1}% threshold ({}/{})",
@@ -468,6 +503,28 @@ fn main() -> Result<()> {
                 new_submap_id,
                 submap_manager.len()
             );
+
+            let candidates = loop_candidate_finder.find_candidates(&submap_manager, new_submap_id);
+
+            if candidates.is_empty() {
+                log::debug!("No loop candidates for submap {}", new_submap_id);
+            } else {
+                log::info!(
+                    "Loop candidates for submap {}: {} candidates",
+                    new_submap_id,
+                    candidates.len()
+                );
+
+                for c in &candidates {
+                    log::info!(
+                        "  candidate={} distance={:.2}m separation={} target_submaps={:?}",
+                        c.candidate_id,
+                        c.distance,
+                        c.submap_separation,
+                        c.target_submap_ids,
+                    );
+                }
+            }
         }
 
         let rotation = current_transform
@@ -537,13 +594,19 @@ fn main() -> Result<()> {
         .values()
         .map(|(sum, count)| {
             let n = *count as f64;
-            [(sum[0] / n) as f32, (sum[1] / n) as f32, (sum[2] / n) as f32]
+            [
+                (sum[0] / n) as f32,
+                (sum[1] / n) as f32,
+                (sum[2] / n) as f32,
+            ]
         })
         .collect();
 
-    
     let save_path = format!("{}/final_submap_map.pcd", SAVE_DIR);
-    save_pcd_xyzit(&convert_vec_to_xyz(&downsampled_sub_map_points_vec), &save_path)?;
+    save_pcd_xyzit(
+        &convert_vec_to_xyz(&downsampled_sub_map_points_vec),
+        &save_path,
+    )?;
 
     log::info!(
         "Saved final submap map: {}, submaps={}",
@@ -644,7 +707,11 @@ fn main() -> Result<()> {
         .values()
         .map(|(sum, count)| {
             let n = *count as f64;
-            [(sum[0] / n) as f32, (sum[1] / n) as f32, (sum[2] / n) as f32]
+            [
+                (sum[0] / n) as f32,
+                (sum[1] / n) as f32,
+                (sum[2] / n) as f32,
+            ]
         })
         .collect();
     log::info!(
@@ -664,10 +731,7 @@ fn main() -> Result<()> {
     //     &save_path,
     // )?;
     // --- Save final local map for visualization ---
-    let save_path = format!(
-        "{}/final_global_map_v-{}.pcd",
-        SAVE_DIR, voxel_size
-    );
+    let save_path = format!("{}/final_global_map_v-{}.pcd", SAVE_DIR, voxel_size);
     save_pcd_xyzit(
         &convert_vec_to_xyz(&downsampled_global_map_points_vec),
         &save_path,

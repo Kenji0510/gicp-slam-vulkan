@@ -1,6 +1,5 @@
 use std::{
-    env,
-    fs,
+    env, fs,
     path::{Path, PathBuf},
 };
 
@@ -45,14 +44,17 @@ fn main() {
     );
 
     let shaders: &[(&str, &str)] = &[
-        ("src/kernels/gicp/gicp.glsl",                     "gicp.spv"),
-        ("src/kernels/search_neighbor/search.glsl",        "search_neighbor.spv"),
-        ("src/kernels/voxelization/init.glsl",             "voxel_init.spv"),
-        ("src/kernels/voxelization/insert.glsl",           "voxel_insert.spv"),
-        ("src/kernels/voxelization/compact.glsl",          "voxel_compact.spv"),
-        ("src/kernels/covariances/covariance.glsl",        "covariance.spv"),
-        ("src/kernels/knn_search/knn_search.glsl",         "knn_search.spv"),
-        ("src/kernels/transform/transform.glsl",           "transform.spv"),
+        ("src/kernels/gicp/gicp.glsl", "gicp.spv"),
+        (
+            "src/kernels/search_neighbor/search.glsl",
+            "search_neighbor.spv",
+        ),
+        ("src/kernels/voxelization/init.glsl", "voxel_init.spv"),
+        ("src/kernels/voxelization/insert.glsl", "voxel_insert.spv"),
+        ("src/kernels/voxelization/compact.glsl", "voxel_compact.spv"),
+        ("src/kernels/covariances/covariance.glsl", "covariance.spv"),
+        ("src/kernels/knn_search/knn_search.glsl", "knn_search.spv"),
+        ("src/kernels/transform/transform.glsl", "transform.spv"),
     ];
 
     for (src_rel, out_name) in shaders {
