@@ -57,7 +57,7 @@ const SUBMAP_MAX_DISTANCE: f32 = 5.0;
 const SUBMAP_MAX_POINTS: usize = 300_000;
 
 const MIN_SUBMAP_SEPARATION: u64 = 10;
-const SEARCH_RADIUS: f32 = 5.0;
+const SEARCH_RADIUS: f32 = 10.0;
 const MAX_CANDIDATES: usize = 5;
 const TARGET_NEIGHBOR_COUNT: u64 = 2;
 const USE_XY_DISTANCE: bool = true;
@@ -524,6 +524,25 @@ fn main() -> Result<()> {
                         c.target_submap_ids,
                     );
                 }
+            }
+
+            for cand in &candidates {
+                let target_cloud = loop_candidate_finder.build_target_cloud(&submap_manager, cand);
+
+                let Some(source_cloud) =
+                    loop_candidate_finder.build_source_cloud(&submap_manager, cand)
+                else {
+                    continue;
+                };
+
+                log::info!(
+                    "Loop target built: current={} candidate={} target_submaps={:?} source_pts={} target_pts={}",
+                    cand.current_id,
+                    cand.candidate_id,
+                    cand.target_submap_ids,
+                    source_cloud.points_world.len(),
+                    target_cloud.points_world.len(),
+                );
             }
         }
 
