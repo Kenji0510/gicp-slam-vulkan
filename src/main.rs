@@ -5,23 +5,10 @@ use gicp_slam_vulkan::{
     convert_type::{
         convert_pcd_to_xyz, convert_point3_to_vec, convert_vec_point_cov_to_pcd_xyzcov,
         convert_vec_to_point3, convert_vec_to_xyz, convert_xyz_to_vec,
-    },
-    deskew_points::deskew_points,
-    file_handler::{
+    }, deskew_points::deskew_points, file_handler::{
         load_imu_data, load_pcd_files, load_pcd_xyzit, save_pcd_xyzcov, save_pcd_xyzit,
         save_pcd_xyznormal,
-    },
-    gpu_copy::GpuTransferDataContext,
-    gpu_covariances::{self, combine_pts_with_normals},
-    gpu_gicp::{GicpGpuContext, GicpStaticBuffers, solve_gicp},
-    gpu_knn_search,
-    gpu_search_neighbor::SearchGpuContext,
-    gpu_transform,
-    gpu_voxel::VoxelGpuContext,
-    init_gpu::VulkanContext,
-    log_performance::PerformanceLogs,
-    predict_pose_by_imu::{align_imu_timestamps, build_rotation_trajectory, predict_pose_by_imu},
-    voxel_map::{LocalMap, LocalMapConfig},
+    }, gpu_copy::GpuTransferDataContext, gpu_covariances::{self, combine_pts_with_normals}, gpu_gicp::{GicpGpuContext, GicpStaticBuffers, solve_gicp}, gpu_knn_search, gpu_search_neighbor::SearchGpuContext, gpu_transform, gpu_voxel::VoxelGpuContext, init_gpu::VulkanContext, log_performance::PerformanceLogs, predict_pose_by_imu::{align_imu_timestamps, build_rotation_trajectory, predict_pose_by_imu}, submap::{SubmapConfig, SubmapManager, matrix4_to_isometry3, transform_submap_points_to_world}, voxel_map::{LocalMap, LocalMapConfig}
 };
 use nalgebra::{Matrix4, Point3, Quaternion, UnitQuaternion, Vector3};
 
@@ -49,6 +36,10 @@ const MIN_MATCH_RATIO: f32 = 0.65;
 /// LocalMap のハッシュグリッドセルサイズ。
 /// downsample_voxel_size とは独立に設定する。大きいほど query が高速。
 const LOCAL_MAP_INDEX_VOXEL_SIZE: f32 = 0.25;
+
+const SUBMAP_MAX_FRAMES: usize = 30;
+const SUBMAP_MAX_DISTANCE: f32 = 5.0;
+const SUBMAP_MAX_POINTS: usize = 300_000;
 
 // IMU coordination to LiDAR coordination (Robosense 96 beam)
 // Quaternion (x, y, z, w): -0.705437, 0.708767, -0.00246579, 0.00097028
@@ -99,6 +90,12 @@ fn main() -> Result<()> {
     let mut search_neighbor_gpu_context = SearchGpuContext::new(vulkan_context.clone())?;
     let mut gicp_gpu_context = GicpGpuContext::new(vulkan_context.clone())?;
     // --- Initialize Vulkan context ---
+
+    let mut submap_manager = SubmapManager::new(SubmapConfig {
+        max_frames_per_submap: SUBMAP_MAX_FRAMES,
+        max_distance_per_submap: SUBMAP_MAX_DISTANCE,
+        max_points_per_submap: SUBMAP_MAX_POINTS,
+    });
 
     let pcd_dir = format!("{}/pcd", LOAD_DIR);
     let pcd_files = load_pcd_files(&pcd_dir)?;
@@ -167,6 +164,15 @@ fn main() -> Result<()> {
     });
     local_voxel_map.insert_frame(&downsampled_points, Point3::origin());
     // --- Build local voxel map (sliding window) ---
+
+    let init_pose = matrix4_to_isometry3(&Matrix4::<f64>::identity());
+
+    submap_manager.insert_frame(
+        0,
+        init_pose,
+        &downsampled_points,
+        &downsampled_points,
+    );
 
     let mut prev_frame_start_time = pcd
         .iter()
@@ -448,6 +454,22 @@ fn main() -> Result<()> {
         let origin = Point3::new(t[0] as f32, t[1] as f32, t[2] as f32);
 
         let mut downsampled_source_points = convert_vec_to_point3(&downsampled_source_points_vec);
+
+        let frame_pose_world = matrix4_to_isometry3(&current_transform);
+
+        if let Some(new_submap_id) = submap_manager.insert_frame(
+            i as u64,
+            frame_pose_world,
+            &downsampled_source_points,
+            &downsampled_source_points,
+        ) {
+            log::info!(
+                "Created submap {} / total submaps = {}",
+                new_submap_id,
+                submap_manager.len()
+            );
+        }
+
         let rotation = current_transform
             .fixed_view::<3, 3>(0, 0)
             .into_owned()
@@ -483,6 +505,51 @@ fn main() -> Result<()> {
         current_global_pose = current_transform;
         prev_frame_start_time = current_frame_start_time; // 次フレームのIMU積分の開始時刻を更新
     }
+
+    submap_manager.finalize_active();
+
+    let mut submap_global_points = Vec::<Point3<f32>>::new();
+
+    for submap in &submap_manager.submaps {
+        let pts = transform_submap_points_to_world(submap);
+        submap_global_points.extend(pts);
+    }
+
+    let submap_global_points_vec = convert_point3_to_vec(&submap_global_points);
+
+    let voxel_size = 0.25;
+    let inv_voxel_size = 1.0 / voxel_size;
+    let mut voxel_map: std::collections::HashMap<(i64, i64, i64), ([f64; 3], usize)> =
+        std::collections::HashMap::new();
+    for p in &submap_global_points_vec {
+        let key = (
+            (p[0] as f64 * inv_voxel_size as f64).floor() as i64,
+            (p[1] as f64 * inv_voxel_size as f64).floor() as i64,
+            (p[2] as f64 * inv_voxel_size as f64).floor() as i64,
+        );
+        let entry = voxel_map.entry(key).or_insert(([0.0; 3], 0));
+        entry.0[0] += p[0] as f64;
+        entry.0[1] += p[1] as f64;
+        entry.0[2] += p[2] as f64;
+        entry.1 += 1;
+    }
+    let downsampled_sub_map_points_vec: Vec<[f32; 3]> = voxel_map
+        .values()
+        .map(|(sum, count)| {
+            let n = *count as f64;
+            [(sum[0] / n) as f32, (sum[1] / n) as f32, (sum[2] / n) as f32]
+        })
+        .collect();
+
+    
+    let save_path = format!("{}/final_submap_map.pcd", SAVE_DIR);
+    save_pcd_xyzit(&convert_vec_to_xyz(&downsampled_sub_map_points_vec), &save_path)?;
+
+    log::info!(
+        "Saved final submap map: {}, submaps={}",
+        save_path,
+        submap_manager.len()
+    );
 
     // --- Save logs ---
     let log_save_path = format!(

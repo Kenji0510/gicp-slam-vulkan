@@ -176,51 +176,6 @@ fn neighbor_keys(key: &VoxelKey) -> impl IntoIterator<Item = VoxelKey> {
     neighbors
 }
 
-// fn compute_raw_covariance_from_points(
-//     points: &[Point3<f32>],
-//     mean: &Point3<f32>,
-// ) -> Option<Matrix3<f32>> {
-//     if points.len() < 3 {
-//         return None;
-//     }
-
-//     let mut cov = Matrix3::<f32>::zeros();
-//     for p in points {
-//         let d = p - mean;
-//         cov += d * d.transpose();
-//     }
-//     cov /= (points.len() - 1) as f32;
-
-//     if !is_finite_matrix3(&cov) {
-//         return None;
-//     }
-
-//     Some(cov)
-// }
-
-// pub fn regularize_gicp_covariance(cov: Matrix3<f32>) -> Matrix3<f32> {
-//     let eigen = SymmetricEigen::new(cov);
-//     let rot = eigen.eigenvectors;
-//     let mut vals = eigen.eigenvalues;
-
-//     let mut pairs: Vec<(f32, usize)> = vals
-//         .iter()
-//         .cloned()
-//         .enumerate()
-//         .map(|(i, v)| (v, i))
-//         .collect();
-//     pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-
-//     let min_idx = pairs[0].1;
-//     vals[min_idx] = 1e-3; // 法線方向を薄くする
-//     vals[pairs[1].1] = 1.0;
-//     vals[pairs[2].1] = 1.0;
-
-//     // C = R * S * R^T
-//     let regularized_cov = rot * Matrix3::from_diagonal(&vals) * rot.transpose();
-//     regularized_cov
-// }
-
 pub fn build_gicp_voxel_map(
     points: &[Point3<f32>],
     gicp_voxel_size: f32,

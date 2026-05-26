@@ -14,3 +14,4 @@ pub mod log_performance;
 pub mod predict_pose_by_imu;
 pub mod types;
 pub mod voxel_map;
+pub mod submap;
