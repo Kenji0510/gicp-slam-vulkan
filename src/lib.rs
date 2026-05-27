@@ -13,6 +13,7 @@ pub mod init_gpu;
 pub mod log_performance;
 pub mod loop_closure;
 pub mod predict_pose_by_imu;
+pub mod registration;
 pub mod submap;
 pub mod types;
 pub mod voxel_map;

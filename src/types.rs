@@ -2,6 +2,12 @@ use nalgebra::Point3;
 use pcd_rs::{PcdDeserialize, PcdSerialize};
 use serde::{Deserialize, Serialize};
 
+use crate::{
+    gpu_copy::GpuTransferDataContext, gpu_covariances::CovarianceGpuContext,
+    gpu_gicp::GicpGpuContext, gpu_search_neighbor::SearchGpuContext,
+    gpu_transform::TransformGpuContext, gpu_voxel::VoxelGpuContext,
+};
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LoadIMU {
     pub timestamp: u64,
@@ -59,4 +65,16 @@ pub struct PointXYZNormal {
     pub normal_x: f32,
     pub normal_y: f32,
     pub normal_z: f32,
+}
+
+pub struct GPUContext {
+    pub copy_source_gpu_context: GpuTransferDataContext,
+    pub copy_target_gpu_context: GpuTransferDataContext,
+    pub source_voxel_gpu_context: VoxelGpuContext,
+    pub target_voxel_gpu_context: VoxelGpuContext,
+    pub source_covariances_gpu_context: CovarianceGpuContext,
+    pub target_covariances_gpu_context: CovarianceGpuContext,
+    pub transform_gpu_context: TransformGpuContext,
+    pub search_neighbor_gpu_context: SearchGpuContext,
+    pub gicp_gpu_context: GicpGpuContext,
 }

@@ -27,7 +27,7 @@ pub struct SearchNeighborParams {
     pub num_source: u32,
     pub num_target: u32,
     pub table_size: u32,
-    pub search_range: i32,
+    pub search_range: u32,
     pub voxel_size: f32,
     pub max_dist_sq: f32,
 }
@@ -111,7 +111,7 @@ impl SearchGpuContext {
         downsampled_source_pts_num: usize,
         downsample_target_gpu_context: &VoxelGpuContext,
         downsampled_target_pts_num: usize,
-        search_range: i32,
+        search_range: usize,
         max_dist_sq: f32,
     ) -> Result<(Vec<i32>, Vec<f32>)> {
         let device = &self.vulkan_context.device;
@@ -126,7 +126,7 @@ impl SearchGpuContext {
             num_source: downsampled_source_pts_num as u32,
             num_target: downsampled_target_pts_num as u32,
             table_size: downsample_target_gpu_context.table_size as u32,
-            search_range,
+            search_range: search_range as u32,
             voxel_size: downsample_target_gpu_context.voxel_size,
             max_dist_sq,
         };

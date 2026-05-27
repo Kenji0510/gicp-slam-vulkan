@@ -22,7 +22,9 @@ use gicp_slam_vulkan::{
     log_performance::PerformanceLogs,
     loop_closure::{LoopCandidateConfig, LoopCandidateFinder},
     predict_pose_by_imu::{align_imu_timestamps, build_rotation_trajectory, predict_pose_by_imu},
+    registration::{RegistrationParams, registration},
     submap::{SubmapConfig, SubmapManager, matrix4_to_isometry3, transform_submap_points_to_world},
+    types::GPUContext,
     voxel_map::{LocalMap, LocalMapConfig},
 };
 use nalgebra::{Matrix4, Point3, Quaternion, UnitQuaternion, Vector3};
@@ -42,7 +44,7 @@ const MIN_POINTS_PER_VOXEL: usize = 3;
 const LOCAL_MAP_MAX_FRAMES: usize = 60;
 const LOCAL_MAP_MAX_DISTANCE: f32 = 20.0;
 
-const SEARCH_RANGE: i32 = 3; // Range of 7x7x7 voxels
+const SEARCH_RANGE: usize = 3; // Range of 7x7x7 voxels
 const MAX_DIST_SQ: f32 = 0.09; // Optional maximum distance squared
 
 /// dist_sq <= MAX_DIST_SQ を満たす点の割合がこの値を下回るフレームはGICPをスキップする（0.0 で無効）
@@ -112,6 +114,18 @@ fn main() -> Result<()> {
     let mut gicp_gpu_context = GicpGpuContext::new(vulkan_context.clone())?;
     // --- Initialize Vulkan context ---
 
+    let mut gpu_context = GPUContext {
+        copy_source_gpu_context,
+        copy_target_gpu_context,
+        source_voxel_gpu_context,
+        target_voxel_gpu_context,
+        source_covariances_gpu_context,
+        target_covariances_gpu_context,
+        transform_gpu_context,
+        search_neighbor_gpu_context,
+        gicp_gpu_context,
+    };
+
     let mut submap_manager = SubmapManager::new(SubmapConfig {
         max_frames_per_submap: SUBMAP_MAX_FRAMES,
         max_distance_per_submap: SUBMAP_MAX_DISTANCE,
@@ -157,15 +171,18 @@ fn main() -> Result<()> {
     let points_vec = convert_xyz_to_vec(&pcd);
 
     // --- Copy points to gpu memory ---
-    copy_target_gpu_context.copy_data_to_gpu(&points_vec, points_vec.len())?;
+    gpu_context
+        .copy_target_gpu_context
+        .copy_data_to_gpu(&points_vec, points_vec.len())?;
     // --- Copy points to gpu memory ---
 
     // --- Downsample for density normalization ---
     let downsample_voxel_size = DOWNSAMPLE_VOXEL_SIZE;
     let points_num = points_vec.len();
 
-    let downsampled_points_vec =
-        target_voxel_gpu_context.voxelization(&copy_target_gpu_context, downsample_voxel_size)?;
+    let downsampled_points_vec = gpu_context
+        .target_voxel_gpu_context
+        .voxelization(&gpu_context.copy_target_gpu_context, downsample_voxel_size)?;
     // let downsampled_init_points = voxel_downsample_points(&points, downsample_voxel_size);
 
     // let downsampled_pcd = convert_vec_to_xyz(&downsampled_points_vec);
@@ -264,220 +281,29 @@ fn main() -> Result<()> {
         );
         // --- Create local map ---
 
+        // --- Convert data to Vec format for GPU ---
         let points_vec = convert_point3_to_vec(&deskewed_points);
-
-        // --- Copy points to gpu memory ---
-        copy_source_gpu_context.copy_data_to_gpu(&points_vec, points_vec.len())?;
         let local_map_points_vec = convert_point3_to_vec(&local_map);
-        copy_target_gpu_context
-            .copy_data_to_gpu(&local_map_points_vec, local_map_points_vec.len())?;
-        // --- Copy points to gpu memory ---
+        // --- Convert data to Vec format for GPU ---
 
-        // --- Downsample for density normalization ---
-        let start = Instant::now();
-        let downsampled_source_points_vec = source_voxel_gpu_context
-            .voxelization(&copy_source_gpu_context, downsample_voxel_size)?;
-        target_voxel_gpu_context
-            .voxelization_gpu_only(&copy_target_gpu_context, downsample_voxel_size)?;
-        let duration = start.elapsed();
-        performance_logs
-            .voxelization_time_ms
-            .push(duration.as_secs_f32() * 1000.0);
-        log::debug!(
-            "Voxelization time: {:.2} ms",
-            performance_logs.voxelization_time_ms.last().unwrap()
-        );
-        // --- Downsample for density normalization ---
+        let registration_params = RegistrationParams {
+            gicp_iterations: GICP_ITERATIONS,
+            search_range: SEARCH_RANGE,
+            max_dist_sq: MAX_DIST_SQ,
+            min_match_ratio: MIN_MATCH_RATIO,
+        };
 
-        let mut current_transform = pose_prediction.0;
-
-        // --- Compute covariance for each point ---
-        // let start = Instant::now();
-        // source_knn_gpu_context.knn_search_neighbors(&source_voxel_gpu_context)?;
-        // target_knn_gpu_context.knn_search_neighbors(&target_voxel_gpu_context)?;
-        // let duration = start.elapsed();
-        // performance_logs
-        //     .knn_search_time_ms
-        //     .push(duration.as_secs_f32() * 1000.0);
-        // log::debug!(
-        //     "KNN search completed in {:.2} ms",
-        //     performance_logs.knn_search_time_ms.last().unwrap()
-        // );
-
-        let start = Instant::now();
-        source_covariances_gpu_context.compute_covariances_gpu_only(&source_voxel_gpu_context)?;
-        target_covariances_gpu_context.compute_covariances_gpu_only(&target_voxel_gpu_context)?;
-        let duration = start.elapsed();
-        performance_logs
-            .compute_covariances_time_ms
-            .push(duration.as_secs_f32() * 1000.0);
-        log::debug!(
-            "Covariance computation completed in {:.2} ms",
-            performance_logs.compute_covariances_time_ms.last().unwrap()
-        );
-
-        // --- Debug ---
-        // let pcd_xyznormals = combine_pts_with_normals(&downsampled_points_vec, &normals)?;
-        // let pcd_xyzcov =
-        //     convert_vec_point_cov_to_pcd_xyzcov(&downsampled_points_vec, &covariances);
-        // let save_path = format!("{}/debug/pcd_with_covariances_{:04}.pcd", SAVE_DIR, i);
-
-        // save_pcd_xyzcov(&pcd_xyzcov, &save_path)?;
-        // --- Debug ---
-        // --- Compute covariance for each point ---
-
-        // --- GICP optimization iterations ---
-        let gicp_start = Instant::now();
-        let mut frame_valid = true;
-        'gicp: for gicp_iter in 0..GICP_ITERATIONS {
-            log::info!("GICP iteration {}/{}", gicp_iter + 1, GICP_ITERATIONS);
-
-            let m = current_transform;
-            let mut transform_params = gpu_transform::TransformParams {
-                r00: m[(0, 0)] as f32,
-                r01: m[(0, 1)] as f32,
-                r02: m[(0, 2)] as f32,
-                t0: m[(0, 3)] as f32,
-                r10: m[(1, 0)] as f32,
-                r11: m[(1, 1)] as f32,
-                r12: m[(1, 2)] as f32,
-                t1: m[(1, 3)] as f32,
-                r20: m[(2, 0)] as f32,
-                r21: m[(2, 1)] as f32,
-                r22: m[(2, 2)] as f32,
-                t2: m[(2, 3)] as f32,
-                num_points: source_voxel_gpu_context.h_downsampled_pts_num as u32,
-            };
-
-            // --- Transform the points ---
-            let start_transform = Instant::now();
-            transform_gpu_context.transform(
-                &source_voxel_gpu_context,
-                &source_covariances_gpu_context,
-                transform_params,
-            )?;
-            let duration_transform = start_transform.elapsed();
-            performance_logs
-                .transform_points_time_ms
-                .push(duration_transform.as_secs_f32() * 1000.0);
-            log::debug!(
-                "Point transformation completed in {:.2} ms",
-                performance_logs.transform_points_time_ms.last().unwrap()
-            );
-            // --- Transform the points ---
-
-            // --- Search neighbor points for each point ---
-            let start_search_neighbor = Instant::now();
-            let (_h_neighbor_indices, h_neighbor_dists_sq) = search_neighbor_gpu_context
-                .search_neighbor(
-                    &transform_gpu_context,
-                    source_voxel_gpu_context.h_downsampled_pts_num,
-                    &target_voxel_gpu_context,
-                    target_voxel_gpu_context.h_downsampled_pts_num,
-                    SEARCH_RANGE,
-                    MAX_DIST_SQ,
-                )?;
-            let duration_search_neighbor = start_search_neighbor.elapsed();
-            performance_logs
-                .find_neighbors_time_ms
-                .push(duration_search_neighbor.as_secs_f32() * 1000.0);
-            log::debug!(
-                "Neighbor search completed in {:.2} ms",
-                performance_logs.find_neighbors_time_ms.last().unwrap()
-            );
-
-            // --- Check match ratio on first iteration ---
-            if gicp_iter == 0 {
-                let total = h_neighbor_dists_sq.len();
-                let valid_count = h_neighbor_dists_sq
-                    .iter()
-                    .filter(|&&d| d >= 0.0 && d <= MAX_DIST_SQ)
-                    .count();
-                let ratio = if total > 0 {
-                    valid_count as f32 / total as f32
-                } else {
-                    0.0
-                };
-                log::debug!(
-                    "Match ratio (dist <= {:.3}): {:.1}% ({}/{})",
-                    MAX_DIST_SQ,
-                    ratio * 100.0,
-                    valid_count,
-                    total
-                );
-                if ratio < MIN_MATCH_RATIO {
-                    log::warn!(
-                        "Frame skipped: match ratio {:.1}% < {:.1}% threshold ({}/{})",
-                        ratio * 100.0,
-                        MIN_MATCH_RATIO * 100.0,
-                        valid_count,
-                        total
-                    );
-                    frame_valid = false;
-                    break 'gicp;
-                }
-            }
-            // --- Check match ratio on first iteration ---
-            // --- Search neighbor points for each point ---
-
-            // --- GICP optimization ---
-            let gicp_bufs = GicpStaticBuffers {
-                d_source_pts: transform_gpu_context
-                    .d_buf_output_pts
-                    .as_ref()
-                    .context("Failed to get transformed source points buffer")?
-                    .clone(),
-                d_source_covs: transform_gpu_context
-                    .d_buf_output_covs
-                    .as_ref()
-                    .context("Failed to get transformed source covariances buffer")?
-                    .clone(),
-                d_target_pts: target_voxel_gpu_context
-                    .d_buf_out_pts
-                    .as_ref()
-                    .context("Failed to get target points buffer")?
-                    .clone(),
-                d_target_covs: target_covariances_gpu_context
-                    .d_buf_covariances
-                    .as_ref()
-                    .context("Failed to get target covariances buffer")?
-                    .clone(),
-            };
-
-            let gicp_iteration_start = Instant::now();
-            let (h_vec, b_vec) = gicp_gpu_context.compute_gicp(
-                &gicp_bufs,
-                &search_neighbor_gpu_context,
-                source_voxel_gpu_context.h_downsampled_pts_num,
-                target_voxel_gpu_context.h_downsampled_pts_num,
-                MAX_DIST_SQ,
-            )?;
-            let gicp_iteration_duration = gicp_iteration_start.elapsed();
-            performance_logs
-                .each_gicp_time_ms
-                .push(gicp_iteration_duration.as_secs_f32() * 1000.0);
-            log::debug!(
-                "GICP iteration {} completed in {:.2} ms",
-                gicp_iter + 1,
-                performance_logs.each_gicp_time_ms.last().unwrap()
-            );
-
-            let h = nalgebra::Matrix6::from_row_slice(&h_vec);
-            let b = nalgebra::Vector6::from_row_slice(&b_vec);
-            if let Some(delta) = solve_gicp((h, b), 1.0e-4) {
-                current_transform = delta * current_transform;
-            }
-            // --- GICP optimization ---
-        }
-        let gicp_duration = gicp_start.elapsed();
-        performance_logs
-            .total_gicp_time_ms
-            .push(gicp_duration.as_secs_f32() * 1000.0);
-        log::debug!(
-            "Total GICP optimization completed in {:.2} ms",
-            performance_logs.total_gicp_time_ms.last().unwrap()
-        );
-        // --- GICP optimization iterations ---
+        // --- Registration ---
+        let (frame_valid, current_transform, downsampled_source_points_vec) = registration(
+            &points_vec,
+            &local_map_points_vec,
+            downsample_voxel_size,
+            &pose_prediction.0,
+            &mut gpu_context,
+            &registration_params,
+            &mut performance_logs,
+        )?;
+        // --- Registration ---
 
         if !frame_valid {
             prev_frame_start_time = current_frame_start_time;
