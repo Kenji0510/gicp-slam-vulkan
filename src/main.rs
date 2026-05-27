@@ -20,7 +20,7 @@ use gicp_slam_vulkan::{
     gpu_voxel::VoxelGpuContext,
     init_gpu::VulkanContext,
     log_performance::PerformanceLogs,
-    loop_closure::{LoopCandidateConfig, LoopCandidateFinder},
+    loop_closure::{LoopAlignmentConfig, LoopCandidateConfig, LoopCandidateFinder, align_loop_candidate},
     predict_pose_by_imu::{align_imu_timestamps, build_rotation_trajectory, predict_pose_by_imu},
     registration::{RegistrationParams, registration},
     submap::{SubmapConfig, SubmapManager, matrix4_to_isometry3, transform_submap_points_to_world},
@@ -63,6 +63,19 @@ const SEARCH_RADIUS: f32 = 10.0;
 const MAX_CANDIDATES: usize = 5;
 const TARGET_NEIGHBOR_COUNT: u64 = 2;
 const USE_XY_DISTANCE: bool = true;
+
+// --- For loop closuer ---
+const LOOP_GICP_ITERATIONS: usize = 10;
+const LOOP_ALIGNMENT_VOXEL_SIZE: f32 = 0.25;
+const LOOP_SEARCH_RANGE: usize = 4;
+const LOOP_MAX_DIST_SQ: f32 = 1.0;
+const LOOP_MIN_MATCH_RATIO: f32 = 0.25;
+
+const LOOP_MIN_VALID_RATIO: f32 = 0.35;
+const LOOP_MAX_RMSE: f32 = 0.5;
+const LOOP_MAX_TRANSLATION_CORRECTION: f32 = 5.0;
+const LOOP_MAX_ROTATION_CORRECTION_RAD: f32 = 20.0_f32.to_radians();
+// --- For loop closuer ---
 
 // IMU coordination to LiDAR coordination (Robosense 96 beam)
 // Quaternion (x, y, z, w): -0.705437, 0.708767, -0.00246579, 0.00097028
@@ -139,6 +152,18 @@ fn main() -> Result<()> {
         target_neighbor_count: TARGET_NEIGHBOR_COUNT,
         use_xy_distance: USE_XY_DISTANCE,
     });
+
+    let loop_alignment_config = LoopAlignmentConfig {
+        voxel_size: LOOP_ALIGNMENT_VOXEL_SIZE,
+        gicp_iterations: LOOP_GICP_ITERATIONS,
+        search_range: LOOP_SEARCH_RANGE,
+        max_dist_sq: LOOP_MAX_DIST_SQ,
+        min_match_ratio: LOOP_MIN_MATCH_RATIO,
+        min_valid_ratio: LOOP_MIN_VALID_RATIO,
+        max_rmse: LOOP_MAX_RMSE,
+        max_translation_correction: LOOP_MAX_TRANSLATION_CORRECTION,
+        max_rotation_correction_rad: LOOP_MAX_ROTATION_CORRECTION_RAD,
+    };
 
     let pcd_dir = format!("{}/pcd", LOAD_DIR);
     let pcd_files = load_pcd_files(&pcd_dir)?;
@@ -369,6 +394,45 @@ fn main() -> Result<()> {
                     source_cloud.points_world.len(),
                     target_cloud.points_world.len(),
                 );
+
+                match align_loop_candidate(
+                    &loop_alignment_config,
+                    &submap_manager,
+                    cand,
+                    &source_cloud,
+                    &target_cloud,
+                    &mut gpu_context,
+                    &mut performance_logs,
+                ) {
+                    Ok(Some(loop_constraint)) => {
+                        log::info!(
+                            "LoopConstraint candidate created: candidate={} -> current={} valid_ratio={:.1}% rmse={:.4}",
+                            loop_constraint.candidate_id,
+                            loop_constraint.current_id,
+                            loop_constraint.score.valid_ratio * 100.0,
+                            loop_constraint.score.rmse,
+                        );
+
+                        // 次ステップ:
+                        // pose_graph.add_loop_edge(loop_constraint)
+                        // 今はまだ保存 or ログだけでOK
+                    }
+                    Ok(None) => {
+                        log::debug!(
+                            "Loop alignment not accepted: current={} candidate={}",
+                            cand.current_id,
+                            cand.candidate_id,
+                        );
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "Loop alignment error: current={} candidate={} error={:?}",
+                            cand.current_id,
+                            cand.candidate_id,
+                            e,
+                        );
+                    }
+                }
             }
         }
 
