@@ -5,10 +5,33 @@ use gicp_slam_vulkan::{
     convert_type::{
         convert_pcd_to_xyz, convert_point3_to_vec, convert_vec_point_cov_to_pcd_xyzcov,
         convert_vec_to_point3, convert_vec_to_xyz, convert_xyz_to_vec,
-    }, deskew_points::deskew_points, file_handler::{
+    },
+    deskew_points::deskew_points,
+    file_handler::{
         load_imu_data, load_pcd_files, load_pcd_xyzit, save_pcd_xyzcov, save_pcd_xyzit,
         save_pcd_xyznormal,
-    }, gpu_copy::GpuTransferDataContext, gpu_covariances::{self, combine_pts_with_normals}, gpu_gicp::{GicpGpuContext, GicpStaticBuffers, solve_gicp}, gpu_knn_search, gpu_search_neighbor::SearchGpuContext, gpu_transform, gpu_voxel::VoxelGpuContext, init_gpu::VulkanContext, log_performance::PerformanceLogs, loop_closure::{LoopAlignmentConfig, LoopCandidateConfig, LoopCandidateFinder, align_loop_candidate}, pose_graph::{PoseGraph, SimpleLoopCorrectionConfig, default_loop_information, default_odometry_information}, predict_pose_by_imu::{align_imu_timestamps, build_rotation_trajectory, predict_pose_by_imu}, registration::{RegistrationParams, registration}, submap::{SubmapConfig, SubmapManager, matrix4_to_isometry3, transform_submap_points_to_world}, types::GPUContext, voxel_map::{LocalMap, LocalMapConfig}
+    },
+    gpu_copy::GpuTransferDataContext,
+    gpu_covariances::{self, combine_pts_with_normals},
+    gpu_gicp::{GicpGpuContext, GicpStaticBuffers, solve_gicp},
+    gpu_knn_search,
+    gpu_search_neighbor::SearchGpuContext,
+    gpu_transform,
+    gpu_voxel::VoxelGpuContext,
+    init_gpu::VulkanContext,
+    log_performance::PerformanceLogs,
+    loop_closure::{
+        LoopAlignmentConfig, LoopCandidateConfig, LoopCandidateFinder, align_loop_candidate,
+    },
+    pose_graph::{
+        PoseGraph, SimpleLoopCorrectionConfig, default_loop_information,
+        default_odometry_information,
+    },
+    predict_pose_by_imu::{align_imu_timestamps, build_rotation_trajectory, predict_pose_by_imu},
+    registration::{RegistrationParams, registration},
+    submap::{SubmapConfig, SubmapManager, matrix4_to_isometry3, transform_submap_points_to_world},
+    types::GPUContext,
+    voxel_map::{LocalMap, LocalMapConfig},
 };
 use nalgebra::{Matrix4, Point3, Quaternion, UnitQuaternion, Vector3};
 
@@ -429,13 +452,20 @@ fn main() -> Result<()> {
 
                         pose_graph.add_loop_constraint(&loop_constraint);
 
-                        pose_graph.apply_simple_loop_correction(
+                        let corrected = pose_graph.apply_current_submap_only_correction(
                             &mut submap_manager,
                             &loop_constraint,
-                            &SimpleLoopCorrectionConfig {
-                                apply_to_submaps_after_current: false,
-                            },
                         );
+
+                        if corrected {
+                            log::info!(
+                                "Current-only LoopClosure applied: candidate={} -> current={} valid_ratio={:.1}% rmse={:.4}",
+                                loop_constraint.candidate_id,
+                                loop_constraint.current_id,
+                                loop_constraint.score.valid_ratio * 100.0,
+                                loop_constraint.score.rmse,
+                            );
+                        }
 
                         log::info!(
                             "PoseGraph loop edge added: {} -> {}",
@@ -444,6 +474,10 @@ fn main() -> Result<()> {
                         );
 
                         pose_graph.print_summary();
+
+                        if corrected {
+                            break;
+                        }
                     }
                     Ok(None) => {
                         log::debug!(

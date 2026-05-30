@@ -76,12 +76,7 @@ impl PoseGraph {
         });
     }
 
-    pub fn add_odometry_edge(
-        &mut self,
-        prev: &Submap,
-        curr: &Submap,
-        information: Matrix6<f64>,
-    ) {
+    pub fn add_odometry_edge(&mut self, prev: &Submap, curr: &Submap, information: Matrix6<f64>) {
         let relative_pose = prev.pose_world.inverse() * curr.pose_world;
 
         self.edges.push(PoseGraphEdge {
@@ -154,21 +149,69 @@ impl PoseGraph {
         );
     }
 
-    pub fn add_loop_constraint(
+    pub fn apply_current_submap_only_correction(
         &mut self,
+        submap_manager: &mut SubmapManager,
         constraint: &LoopConstraintCandidate,
-    ) {
-        self.nodes.entry(constraint.candidate_id).or_insert(PoseGraphNode {
-            submap_id: constraint.candidate_id,
-            pose_world: Isometry3::identity(),
-            fixed: constraint.candidate_id == 0,
-        });
+    ) -> bool {
+        let Some(current_submap) = submap_manager.get_mut(constraint.current_id) else {
+            log::warn!(
+                "Current-only loop correction failed: submap {} not found",
+                constraint.current_id
+            );
+            return false;
+        };
 
-        self.nodes.entry(constraint.current_id).or_insert(PoseGraphNode {
-            submap_id: constraint.current_id,
-            pose_world: constraint.corrected_current_pose_world,
-            fixed: constraint.current_id == 0,
-        });
+        let old_pose = current_submap.pose_world;
+
+        // current submap だけを loop alignment 後の pose に置き換える
+        current_submap.pose_world = constraint.corrected_current_pose_world;
+
+        current_submap.center_world = nalgebra::Point3::new(
+            current_submap.pose_world.translation.vector.x as f32,
+            current_submap.pose_world.translation.vector.y as f32,
+            current_submap.pose_world.translation.vector.z as f32,
+        );
+
+        // PoseGraph node 側も同期
+        if let Some(node) = self.nodes.get_mut(&constraint.current_id) {
+            node.pose_world = current_submap.pose_world;
+        }
+
+        let delta_t =
+            (current_submap.pose_world.translation.vector - old_pose.translation.vector).norm();
+
+        let delta_r = (current_submap.pose_world.rotation * old_pose.rotation.inverse())
+            .angle()
+            .to_degrees();
+
+        log::info!(
+            "Applied current-only loop correction: current={} candidate={} delta_t={:.3}m delta_r={:.2}deg",
+            constraint.current_id,
+            constraint.candidate_id,
+            delta_t,
+            delta_r,
+        );
+
+        true
+    }
+
+    pub fn add_loop_constraint(&mut self, constraint: &LoopConstraintCandidate) {
+        self.nodes
+            .entry(constraint.candidate_id)
+            .or_insert(PoseGraphNode {
+                submap_id: constraint.candidate_id,
+                pose_world: Isometry3::identity(),
+                fixed: constraint.candidate_id == 0,
+            });
+
+        self.nodes
+            .entry(constraint.current_id)
+            .or_insert(PoseGraphNode {
+                submap_id: constraint.current_id,
+                pose_world: constraint.corrected_current_pose_world,
+                fixed: constraint.current_id == 0,
+            });
 
         self.edges.push(PoseGraphEdge {
             from_id: constraint.candidate_id,

@@ -428,10 +428,7 @@ pub fn registration_with_metrics(
             .find_neighbors_time_ms
             .push(duration_search_neighbor.as_secs_f32() * 1000.0);
 
-        let metrics = compute_match_metrics(
-            &h_neighbor_dists_sq,
-            registration_params.max_dist_sq,
-        );
+        let metrics = compute_match_metrics(&h_neighbor_dists_sq, registration_params.max_dist_sq);
 
         if gicp_iter == 0 {
             first_iter_metrics = metrics.clone();

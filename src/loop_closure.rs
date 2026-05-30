@@ -1,7 +1,12 @@
 use anyhow::{Context, Result};
 use nalgebra::{Isometry3, Matrix4, Matrix6, Point3};
 
-use crate::{log_performance::PerformanceLogs, registration::{RegistrationParams, registration_with_metrics}, submap::{SubmapId, SubmapManager, matrix4_to_isometry3}, types::GPUContext};
+use crate::{
+    log_performance::PerformanceLogs,
+    registration::{RegistrationParams, registration_with_metrics},
+    submap::{SubmapId, SubmapManager, matrix4_to_isometry3},
+    types::GPUContext,
+};
 
 #[derive(Debug, Clone)]
 pub struct LoopCandidateConfig {
