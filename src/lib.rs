@@ -17,3 +17,4 @@ pub mod registration;
 pub mod submap;
 pub mod types;
 pub mod voxel_map;
+pub mod pose_graph;

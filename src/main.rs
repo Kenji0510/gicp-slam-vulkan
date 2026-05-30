@@ -5,27 +5,10 @@ use gicp_slam_vulkan::{
     convert_type::{
         convert_pcd_to_xyz, convert_point3_to_vec, convert_vec_point_cov_to_pcd_xyzcov,
         convert_vec_to_point3, convert_vec_to_xyz, convert_xyz_to_vec,
-    },
-    deskew_points::deskew_points,
-    file_handler::{
+    }, deskew_points::deskew_points, file_handler::{
         load_imu_data, load_pcd_files, load_pcd_xyzit, save_pcd_xyzcov, save_pcd_xyzit,
         save_pcd_xyznormal,
-    },
-    gpu_copy::GpuTransferDataContext,
-    gpu_covariances::{self, combine_pts_with_normals},
-    gpu_gicp::{GicpGpuContext, GicpStaticBuffers, solve_gicp},
-    gpu_knn_search,
-    gpu_search_neighbor::SearchGpuContext,
-    gpu_transform,
-    gpu_voxel::VoxelGpuContext,
-    init_gpu::VulkanContext,
-    log_performance::PerformanceLogs,
-    loop_closure::{LoopAlignmentConfig, LoopCandidateConfig, LoopCandidateFinder, align_loop_candidate},
-    predict_pose_by_imu::{align_imu_timestamps, build_rotation_trajectory, predict_pose_by_imu},
-    registration::{RegistrationParams, registration},
-    submap::{SubmapConfig, SubmapManager, matrix4_to_isometry3, transform_submap_points_to_world},
-    types::GPUContext,
-    voxel_map::{LocalMap, LocalMapConfig},
+    }, gpu_copy::GpuTransferDataContext, gpu_covariances::{self, combine_pts_with_normals}, gpu_gicp::{GicpGpuContext, GicpStaticBuffers, solve_gicp}, gpu_knn_search, gpu_search_neighbor::SearchGpuContext, gpu_transform, gpu_voxel::VoxelGpuContext, init_gpu::VulkanContext, log_performance::PerformanceLogs, loop_closure::{LoopAlignmentConfig, LoopCandidateConfig, LoopCandidateFinder, align_loop_candidate}, pose_graph::{PoseGraph, default_loop_information, default_odometry_information}, predict_pose_by_imu::{align_imu_timestamps, build_rotation_trajectory, predict_pose_by_imu}, registration::{RegistrationParams, registration}, submap::{SubmapConfig, SubmapManager, matrix4_to_isometry3, transform_submap_points_to_world}, types::GPUContext, voxel_map::{LocalMap, LocalMapConfig}
 };
 use nalgebra::{Matrix4, Point3, Quaternion, UnitQuaternion, Vector3};
 
@@ -164,6 +147,8 @@ fn main() -> Result<()> {
         max_translation_correction: LOOP_MAX_TRANSLATION_CORRECTION,
         max_rotation_correction_rad: LOOP_MAX_ROTATION_CORRECTION_RAD,
     };
+
+    let mut pose_graph = PoseGraph::new();
 
     let pcd_dir = format!("{}/pcd", LOAD_DIR);
     let pcd_files = load_pcd_files(&pcd_dir)?;
@@ -355,6 +340,33 @@ fn main() -> Result<()> {
                 submap_manager.len()
             );
 
+            // --- PoseGraph: add node and odometry edge ---
+            {
+                let new_submap = submap_manager
+                    .get(new_submap_id)
+                    .expect("new submap must exist");
+
+                pose_graph.add_node_from_submap(new_submap);
+
+                if new_submap_id > 0 {
+                    if let Some(prev_submap) = submap_manager.get(new_submap_id - 1) {
+                        pose_graph.add_odometry_edge(
+                            prev_submap,
+                            new_submap,
+                            default_odometry_information(),
+                        );
+
+                        log::info!(
+                            "PoseGraph odometry edge added: {} -> {}",
+                            prev_submap.id,
+                            new_submap.id,
+                        );
+                    }
+                }
+
+                pose_graph.print_summary();
+            }
+
             let candidates = loop_candidate_finder.find_candidates(&submap_manager, new_submap_id);
 
             if candidates.is_empty() {
@@ -404,7 +416,7 @@ fn main() -> Result<()> {
                     &mut gpu_context,
                     &mut performance_logs,
                 ) {
-                    Ok(Some(loop_constraint)) => {
+                    Ok(Some(mut loop_constraint)) => {
                         log::info!(
                             "LoopConstraint candidate created: candidate={} -> current={} valid_ratio={:.1}% rmse={:.4}",
                             loop_constraint.candidate_id,
@@ -413,9 +425,17 @@ fn main() -> Result<()> {
                             loop_constraint.score.rmse,
                         );
 
-                        // 次ステップ:
-                        // pose_graph.add_loop_edge(loop_constraint)
-                        // 今はまだ保存 or ログだけでOK
+                        loop_constraint.information = default_loop_information();
+
+                        pose_graph.add_loop_constraint(&loop_constraint);
+
+                        log::info!(
+                            "PoseGraph loop edge added: {} -> {}",
+                            loop_constraint.candidate_id,
+                            loop_constraint.current_id,
+                        );
+
+                        pose_graph.print_summary();
                     }
                     Ok(None) => {
                         log::debug!(

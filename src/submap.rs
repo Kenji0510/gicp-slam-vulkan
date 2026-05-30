@@ -234,6 +234,10 @@ impl SubmapManager {
         self.submaps.iter().find(|s| s.id == id)
     }
 
+    pub fn get_mut(&mut self, id: SubmapId) -> Option<&mut Submap> {
+        self.submaps.iter_mut().find(|s| s.id == id)
+    }
+
     pub fn len(&self) -> usize {
         self.submaps.len()
     }
