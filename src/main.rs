@@ -8,7 +8,7 @@ use gicp_slam_vulkan::{
     }, deskew_points::deskew_points, file_handler::{
         load_imu_data, load_pcd_files, load_pcd_xyzit, save_pcd_xyzcov, save_pcd_xyzit,
         save_pcd_xyznormal,
-    }, gpu_copy::GpuTransferDataContext, gpu_covariances::{self, combine_pts_with_normals}, gpu_gicp::{GicpGpuContext, GicpStaticBuffers, solve_gicp}, gpu_knn_search, gpu_search_neighbor::SearchGpuContext, gpu_transform, gpu_voxel::VoxelGpuContext, init_gpu::VulkanContext, log_performance::PerformanceLogs, loop_closure::{LoopAlignmentConfig, LoopCandidateConfig, LoopCandidateFinder, align_loop_candidate}, pose_graph::{PoseGraph, default_loop_information, default_odometry_information}, predict_pose_by_imu::{align_imu_timestamps, build_rotation_trajectory, predict_pose_by_imu}, registration::{RegistrationParams, registration}, submap::{SubmapConfig, SubmapManager, matrix4_to_isometry3, transform_submap_points_to_world}, types::GPUContext, voxel_map::{LocalMap, LocalMapConfig}
+    }, gpu_copy::GpuTransferDataContext, gpu_covariances::{self, combine_pts_with_normals}, gpu_gicp::{GicpGpuContext, GicpStaticBuffers, solve_gicp}, gpu_knn_search, gpu_search_neighbor::SearchGpuContext, gpu_transform, gpu_voxel::VoxelGpuContext, init_gpu::VulkanContext, log_performance::PerformanceLogs, loop_closure::{LoopAlignmentConfig, LoopCandidateConfig, LoopCandidateFinder, align_loop_candidate}, pose_graph::{PoseGraph, SimpleLoopCorrectionConfig, default_loop_information, default_odometry_information}, predict_pose_by_imu::{align_imu_timestamps, build_rotation_trajectory, predict_pose_by_imu}, registration::{RegistrationParams, registration}, submap::{SubmapConfig, SubmapManager, matrix4_to_isometry3, transform_submap_points_to_world}, types::GPUContext, voxel_map::{LocalMap, LocalMapConfig}
 };
 use nalgebra::{Matrix4, Point3, Quaternion, UnitQuaternion, Vector3};
 
@@ -428,6 +428,14 @@ fn main() -> Result<()> {
                         loop_constraint.information = default_loop_information();
 
                         pose_graph.add_loop_constraint(&loop_constraint);
+
+                        pose_graph.apply_simple_loop_correction(
+                            &mut submap_manager,
+                            &loop_constraint,
+                            &SimpleLoopCorrectionConfig {
+                                apply_to_submaps_after_current: false,
+                            },
+                        );
 
                         log::info!(
                             "PoseGraph loop edge added: {} -> {}",

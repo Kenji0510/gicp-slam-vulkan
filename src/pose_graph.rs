@@ -1,10 +1,27 @@
-use nalgebra::{Isometry3, Matrix6};
+use nalgebra::{Isometry3, Matrix6, Translation3, UnitQuaternion};
 use rustc_hash::FxHashMap;
 
 use crate::{
     loop_closure::LoopConstraintCandidate,
     submap::{Submap, SubmapId, SubmapManager},
 };
+
+#[derive(Debug, Clone)]
+pub struct SimpleLoopCorrectionConfig {
+    /// current_id より後のsubmapにも full correction をかけるか。
+    /// オフラインmap補正だけなら false でOK。
+    /// オンライン追跡にも反映したいなら true 検討。
+    pub apply_to_submaps_after_current: bool,
+}
+
+fn interpolate_correction(delta: &Isometry3<f64>, alpha: f64) -> Isometry3<f64> {
+    let a = alpha.clamp(0.0, 1.0);
+
+    let t = delta.translation.vector * a;
+    let r = UnitQuaternion::<f64>::identity().slerp(&delta.rotation, a);
+
+    Isometry3::from_parts(Translation3::from(t), r)
+}
 
 #[derive(Debug, Clone)]
 pub struct PoseGraphNode {
@@ -74,6 +91,67 @@ impl PoseGraph {
             information,
             kind: PoseGraphEdgeKind::Odometry,
         });
+    }
+
+    pub fn apply_simple_loop_correction(
+        &mut self,
+        submap_manager: &mut SubmapManager,
+        constraint: &LoopConstraintCandidate,
+        config: &SimpleLoopCorrectionConfig,
+    ) {
+        let from_id = constraint.candidate_id;
+        let to_id = constraint.current_id;
+
+        if to_id <= from_id {
+            log::warn!(
+                "Simple loop correction skipped: invalid id range {} -> {}",
+                from_id,
+                to_id
+            );
+            return;
+        }
+
+        let span = (to_id - from_id) as f64;
+
+        // candidate_id は固定、current_id は delta_world 100%。
+        for submap in &mut submap_manager.submaps {
+            let sid = submap.id;
+
+            let alpha = if sid <= from_id {
+                0.0
+            } else if sid <= to_id {
+                (sid - from_id) as f64 / span
+            } else if config.apply_to_submaps_after_current {
+                1.0
+            } else {
+                continue;
+            };
+
+            if alpha <= 0.0 {
+                continue;
+            }
+
+            let correction = interpolate_correction(&constraint.delta_world, alpha);
+
+            submap.pose_world = correction * submap.pose_world;
+            submap.center_world = nalgebra::Point3::new(
+                submap.pose_world.translation.vector.x as f32,
+                submap.pose_world.translation.vector.y as f32,
+                submap.pose_world.translation.vector.z as f32,
+            );
+
+            if let Some(node) = self.nodes.get_mut(&sid) {
+                node.pose_world = submap.pose_world;
+            }
+        }
+
+        log::info!(
+            "Applied simple loop correction: candidate={} current={} delta_t={:.3}m delta_r={:.2}deg",
+            constraint.candidate_id,
+            constraint.current_id,
+            constraint.delta_world.translation.vector.norm(),
+            constraint.delta_world.rotation.angle().to_degrees(),
+        );
     }
 
     pub fn add_loop_constraint(
