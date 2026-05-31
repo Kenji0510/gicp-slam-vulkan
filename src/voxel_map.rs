@@ -20,11 +20,15 @@ pub struct VoxelCell {
     /// タプルの 2 要素目はフレーム ID。
     pub points: Vec<(Point3<f32>, u64)>,
 
-    /// 座標の累積和（インクリメンタルな平均計算用）。
-    sum: Vector3<f32>,
-
-    /// Gaussianの平均 μ。
     pub mean: Point3<f32>,
+    pub sum: Vector3<f32>,
+    pub total_count: usize,
+
+    pub observed_frames: FxHashSet<u64>,
+    pub first_seen_frame_id: u64,
+    pub last_seen_frame_id: u64,
+
+    pub replace_cursor: usize,
 
     /// Gaussianとしてregistrationに使えるだけの点数と数値安定性があるか。
     pub valid: bool,
@@ -38,6 +42,11 @@ impl VoxelCell {
             points: Vec::new(),
             sum: Vector3::zeros(),
             mean: Point3::new(0.0, 0.0, 0.0),
+            total_count: 0,
+            observed_frames: FxHashSet::default(),
+            first_seen_frame_id: 0,
+            last_seen_frame_id: 0,
+            replace_cursor: 0,
             valid: false,
             voxel_key: VoxelKey {
                 ix: 0,
@@ -65,16 +74,33 @@ impl VoxelCell {
         &mut self,
         p: Point3<f32>,
         frame_id: u64,
-        max_points_per_gaussian: usize,
+        max_points_per_voxel: usize,
     ) -> bool {
-        if self.points.len() >= max_points_per_gaussian {
-            return false;
-        }
+        self.total_count += 1;
         self.sum += p.coords;
-        self.points.push((p, frame_id));
-        // O(1) でインクリメンタルに mean を更新
+        self.mean = Point3::from(self.sum / self.total_count as f32);
+
+        self.observed_frames.insert(frame_id);
+        self.last_seen_frame_id = frame_id;
+
+        if self.points.len() < max_points_per_voxel {
+            self.sum += p.coords;
+            self.points.push((p, frame_id));
+        } else {
+            let idx = self.replace_cursor % self.points.len();
+
+            let old = self.points[idx].0;
+            self.sum -= old.coords;
+
+            self.points[idx] = (p, frame_id);
+            self.sum += p.coords;
+
+            self.replace_cursor += 1;
+        }
+
         self.mean = Point3::from(self.sum / self.points.len() as f32);
-        true
+
+        false
     }
 
     /// 指定フレームの点を除去し、sum と mean を O(1) で更新する。
