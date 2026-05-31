@@ -35,8 +35,8 @@ use gicp_slam_vulkan::{
 };
 use nalgebra::{Matrix4, Point3, Quaternion, UnitQuaternion, Vector3};
 
-const LOAD_DIR: &str = "data/input/05242026/path03";
-const SAVE_DIR: &str = "data/output/05242026/debug";
+const LOAD_DIR: &str = "data/input/05302026/park04";
+const SAVE_DIR: &str = "data/output/05302026/debug";
 
 const DOWNSAMPLE_VOXEL_SIZE: f32 = 0.2; // m
 const GICP_ITERATIONS: usize = 5; // Default: 5
