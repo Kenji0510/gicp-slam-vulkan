@@ -35,7 +35,7 @@ use gicp_slam_vulkan::{
 };
 use nalgebra::{Matrix4, Point3, Quaternion, UnitQuaternion, Vector3};
 
-const LOAD_DIR: &str = "data/input/05302026/park04";
+const LOAD_DIR: &str = "data/input/05242026/path04";
 const SAVE_DIR: &str = "data/output/05302026/debug";
 
 const DOWNSAMPLE_VOXEL_SIZE: f32 = 0.2; // m
@@ -46,6 +46,7 @@ const MAX_DIST: f32 = 20.0;
 
 const MAX_POINTS_PER_VOXEL: usize = 50;
 const MIN_POINTS_PER_VOXEL: usize = 3;
+const MIN_OBSERVED_FRAMES_PER_VOXEL: usize = 3;
 
 const LOCAL_MAP_MAX_FRAMES: usize = 60;
 const LOCAL_MAP_MAX_DISTANCE: f32 = 20.0;
@@ -231,6 +232,7 @@ fn main() -> Result<()> {
         min_points_per_voxel: MIN_POINTS_PER_VOXEL,
         max_frames: usize::MAX,      // No limit on frames for global map
         max_distance: f32::INFINITY, // No distance-based eviction for global map
+        min_observed_frames_per_voxel: MIN_OBSERVED_FRAMES_PER_VOXEL,
     });
     global_voxel_map.insert_frame(&downsampled_points, Point3::origin());
 
@@ -240,6 +242,7 @@ fn main() -> Result<()> {
         min_points_per_voxel: MIN_POINTS_PER_VOXEL,
         max_frames: LOCAL_MAP_MAX_FRAMES,
         max_distance: LOCAL_MAP_MAX_DISTANCE,
+        min_observed_frames_per_voxel: MIN_OBSERVED_FRAMES_PER_VOXEL,
     });
     local_voxel_map.insert_frame(&downsampled_points, Point3::origin());
     // --- Build local voxel map (sliding window) ---
@@ -301,8 +304,18 @@ fn main() -> Result<()> {
         let start = Instant::now();
         let t = pose_prediction.0.column(3);
         let sensor_origin_global = Point3::new(t[0] as f32, t[1] as f32, t[2] as f32);
-        let local_map = local_voxel_map
-            .query_points_within_radius(&sensor_origin_global, LOCAL_MAP_MAX_DISTANCE);
+        let mut local_map = local_voxel_map
+            .query_stable_points_within_radius(&sensor_origin_global, LOCAL_MAP_MAX_DISTANCE);
+
+        if local_map.len() < 1000 {
+            log::warn!(
+                "Stable local map too small: {} pts. Fallback to all local map points.",
+                local_map.len()
+            );
+
+            local_map = local_voxel_map
+                .query_points_within_radius(&sensor_origin_global, LOCAL_MAP_MAX_DISTANCE);
+        }
         let duration = start.elapsed();
         performance_logs
             .create_voxel_map_time_ms

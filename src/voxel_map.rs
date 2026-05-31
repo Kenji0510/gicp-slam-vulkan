@@ -47,6 +47,16 @@ impl VoxelCell {
         }
     }
 
+    pub fn observed_frame_count(&self) -> usize {
+        let mut frames = FxHashSet::default();
+
+        for (_, frame_id) in &self.points {
+            frames.insert(*frame_id);
+        }
+
+        frames.len()
+    }
+
     pub fn point_count(&self) -> usize {
         self.points.len()
     }
@@ -233,6 +243,8 @@ pub struct LocalMapConfig {
     pub index_voxel_size: f32,
     pub max_points_per_voxel: usize,
     pub min_points_per_voxel: usize,
+
+    pub min_observed_frames_per_voxel: usize,
     /// フレーム数ベースの追い出し上限。
     pub max_frames: usize,
     /// 距離ベースの追い出し上限 [m]。
@@ -288,7 +300,8 @@ impl LocalMap {
         for &key in &dirty_keys {
             if let Some(cell) = self.voxel_map.get_mut(&key) {
                 // mean は push_point 内で O(1) 更新済み。valid だけ設定する。
-                cell.valid = cell.points.len() >= self.config.min_points_per_voxel;
+                cell.valid = cell.point_count() >= self.config.min_points_per_voxel
+                    && cell.observed_frame_count() >= self.config.min_observed_frames_per_voxel;
             }
         }
 
@@ -385,6 +398,49 @@ impl LocalMap {
                         let dx = p.x - center.x;
                         let dy = p.y - center.y;
                         let dz = p.z - center.z;
+                        if dx * dx + dy * dy + dz * dz <= r_sq {
+                            result.push(*p);
+                        }
+                    }
+                }
+            }
+        }
+
+        result
+    }
+
+    pub fn query_stable_points_within_radius(
+        &self,
+        center: &Point3<f32>,
+        radius: f32,
+    ) -> Vec<Point3<f32>> {
+        let vs = self.config.index_voxel_size;
+        let r_sq = radius * radius;
+
+        let half = (radius / vs).ceil() as i32;
+        let cx = (center.x / vs).floor() as i32;
+        let cy = (center.y / vs).floor() as i32;
+        let cz = (center.z / vs).floor() as i32;
+
+        let mut result = Vec::new();
+
+        for ix in (cx - half)..=(cx + half) {
+            for iy in (cy - half)..=(cy + half) {
+                for iz in (cz - half)..=(cz + half) {
+                    let key = VoxelKey { ix, iy, iz };
+                    let Some(cell) = self.voxel_map.get(&key) else {
+                        continue;
+                    };
+
+                    if !cell.valid {
+                        continue;
+                    }
+
+                    for (p, _) in &cell.points {
+                        let dx = p.x - center.x;
+                        let dy = p.y - center.y;
+                        let dz = p.z - center.z;
+
                         if dx * dx + dy * dy + dz * dz <= r_sq {
                             result.push(*p);
                         }
