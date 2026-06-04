@@ -102,8 +102,9 @@ void main() {
             float C_sum[9];
             uint sc_off = gid * 9u;
             uint tc_off = uint(target_idx) * 9u;
+            const float SOURCE_COV_ALPHA = 0.5; // 0.0: Point-to-Plane ICP
             for (int k = 0; k < 9; k++) {
-                C_sum[k] = target_covs[tc_off + k] + source_covs[sc_off + k];
+                C_sum[k] = target_covs[tc_off + k] + SOURCE_COV_ALPHA * source_covs[sc_off + k];
             }
 
             float Omega[9];

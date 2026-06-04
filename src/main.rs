@@ -35,7 +35,7 @@ use gicp_slam_vulkan::{
 };
 use nalgebra::{Matrix4, Point3, Quaternion, UnitQuaternion, Vector3};
 
-const LOAD_DIR: &str = "data/input/05242026/path04";
+const LOAD_DIR: &str = "data/input/05242026/path03";
 const SAVE_DIR: &str = "data/output/05302026/debug";
 
 const DOWNSAMPLE_VOXEL_SIZE: f32 = 0.2; // m
@@ -44,12 +44,12 @@ const GICP_ITERATIONS: usize = 5; // Default: 5
 const MIN_DIST: f32 = 0.1;
 const MAX_DIST: f32 = 20.0;
 
-const MAX_POINTS_PER_VOXEL: usize = 50;
+const MAX_POINTS_PER_VOXEL: usize = 20;
 const MIN_POINTS_PER_VOXEL: usize = 3;
 const MIN_OBSERVED_FRAMES_PER_VOXEL: usize = 3;
 
 const LOCAL_MAP_MAX_FRAMES: usize = 60;
-const LOCAL_MAP_MAX_DISTANCE: f32 = 20.0;
+const LOCAL_MAP_MAX_DISTANCE: f32 = 25.0;
 
 const SEARCH_RANGE: usize = 3; // Range of 7x7x7 voxels
 const MAX_DIST_SQ: f32 = 0.09; // Optional maximum distance squared
@@ -62,24 +62,24 @@ const MIN_MATCH_RATIO: f32 = 0.65;
 const LOCAL_MAP_INDEX_VOXEL_SIZE: f32 = 0.25;
 
 const SUBMAP_MAX_FRAMES: usize = 30;
-const SUBMAP_MAX_DISTANCE: f32 = 5.0;
+const SUBMAP_MAX_DISTANCE: f32 = 8.0;
 const SUBMAP_MAX_POINTS: usize = 300_000;
 
 const MIN_SUBMAP_SEPARATION: u64 = 10;
 const SEARCH_RADIUS: f32 = 10.0;
-const MAX_CANDIDATES: usize = 5;
+const MAX_CANDIDATES: usize = 7;
 const TARGET_NEIGHBOR_COUNT: u64 = 2;
 const USE_XY_DISTANCE: bool = true;
 
 // --- For loop closuer ---
 const LOOP_GICP_ITERATIONS: usize = 10;
-const LOOP_ALIGNMENT_VOXEL_SIZE: f32 = 0.25;
+const LOOP_ALIGNMENT_VOXEL_SIZE: f32 = 0.20;
 const LOOP_SEARCH_RANGE: usize = 4;
-const LOOP_MAX_DIST_SQ: f32 = 1.0;
-const LOOP_MIN_MATCH_RATIO: f32 = 0.25;
+const LOOP_MAX_DIST_SQ: f32 = 0.09;
+const LOOP_MIN_MATCH_RATIO: f32 = 0.20;
 
 const LOOP_MIN_VALID_RATIO: f32 = 0.35;
-const LOOP_MAX_RMSE: f32 = 0.5;
+const LOOP_MAX_RMSE: f32 = 0.25; 
 const LOOP_MAX_TRANSLATION_CORRECTION: f32 = 5.0;
 const LOOP_MAX_ROTATION_CORRECTION_RAD: f32 = 20.0_f32.to_radians();
 // --- For loop closuer ---
