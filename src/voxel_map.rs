@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 
-use nalgebra::{Matrix3, Point3, Vector3};
+use nalgebra::{Matrix3, Point3, SymmetricEigen, Vector3};
+use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -30,6 +31,13 @@ pub struct VoxelCell {
     pub valid: bool,
 
     pub voxel_key: VoxelKey,
+
+    pub covariance: Matrix3<f32>,
+    pub normal: Vector3<f32>,
+    pub linearity: f32,
+    pub planarity: f32,
+    pub scattering: f32,
+    pub surface_valid: bool,
 }
 
 impl VoxelCell {
@@ -44,6 +52,12 @@ impl VoxelCell {
                 iy: 0,
                 iz: 0,
             },
+            covariance: Matrix3::identity(),
+            normal: Vector3::z_axis().into_inner(),
+            linearity: 0.0,
+            planarity: 0.0,
+            scattering: 1.0,
+            surface_valid: false,
         }
     }
 
@@ -257,6 +271,22 @@ struct FrameEntry {
     dirty_keys: FxHashSet<VoxelKey>,
 }
 
+#[derive(Debug, Clone)]
+struct SurfaceStats {
+    covariance: Matrix3<f32>,
+    normal: Vector3<f32>,
+    linearity: f32,
+    planarity: f32,
+    scattering: f32,
+    surface_valid: bool,
+}
+
+#[derive(Debug, Clone)]
+enum SurfaceUpdate {
+    Valid { key: VoxelKey, stats: SurfaceStats },
+    Invalid { key: VoxelKey },
+}
+
 pub struct LocalMap {
     pub voxel_map: VoxelMap,
     frame_index: VecDeque<FrameEntry>,
@@ -282,28 +312,53 @@ impl LocalMap {
     }
 
     /// ワールド座標系に変換済みの点群を 1 フレームとして挿入する。
-    /// `origin` は当該フレームのセンサー原点（距離ベース追い出しに使用）。
+    ///
+    /// 注意: この関数は normal gate を **内部では実行しない**。
+    /// main 側で `surface_insert_mask()` 済みの点群を渡す前提にすることで、
+    /// normal gate の二重実行を避ける。
     pub fn insert_frame(&mut self, points: &[Point3<f32>], origin: Point3<f32>) {
+        self.insert_frame_no_gate(points, origin);
+    }
+
+    /// normal gate も LocalMap 側で実行したい場合の互換用関数。
+    /// 通常の SLAM ループでは、mask を一度だけ作って `insert_frame()` に渡す方が速い。
+    pub fn insert_frame_with_surface_gate(
+        &mut self,
+        points: &[Point3<f32>],
+        origin: Point3<f32>,
+    ) {
+        let filtered_points: Vec<Point3<f32>> = points
+            .par_iter()
+            .copied()
+            .filter(|p| self.should_accept_by_normal_gate(p))
+            .collect();
+
+        self.insert_frame_no_gate(&filtered_points, origin);
+    }
+
+    fn insert_frame_no_gate(&mut self, points: &[Point3<f32>], origin: Point3<f32>) {
         let frame_id = self.next_frame_id;
         self.next_frame_id += 1;
 
         let mut dirty_keys = FxHashSet::default();
 
+        // HashMap への挿入は排他 mutable が必要なので、ここは逐次で安全に行う。
+        // 重い normal gate と surface 統計再計算は別途 Rayon で並列化する。
         for &p in points {
             let key = voxel_key(&p, self.config.index_voxel_size);
             let cell = self.voxel_map.entry(key).or_insert_with(VoxelCell::new);
+
             if cell.push_point(p, frame_id, self.config.max_points_per_voxel) {
                 dirty_keys.insert(key);
+
+                // 周辺cellの共分散も変わるので近傍もdirtyにする
+                for nk in neighbor_keys(&key) {
+                    dirty_keys.insert(nk);
+                }
             }
         }
 
-        for &key in &dirty_keys {
-            if let Some(cell) = self.voxel_map.get_mut(&key) {
-                // mean は push_point 内で O(1) 更新済み。valid だけ設定する。
-                cell.valid = cell.point_count() >= self.config.min_points_per_voxel
-                    && cell.observed_frame_count() >= self.config.min_observed_frames_per_voxel;
-            }
-        }
+        self.refresh_valid_and_surface_stats_parallel(&dirty_keys);
 
         self.frame_index.push_back(FrameEntry {
             frame_id,
@@ -351,8 +406,14 @@ impl LocalMap {
         };
 
         let mut to_remove = Vec::new();
+        let mut recompute_keys = FxHashSet::default();
 
         for &key in &entry.dirty_keys {
+            recompute_keys.insert(key);
+            for nk in neighbor_keys(&key) {
+                recompute_keys.insert(nk);
+            }
+
             if let Some(cell) = self.voxel_map.get_mut(&key) {
                 let has_points =
                     cell.remove_frame_points(entry.frame_id, self.config.min_points_per_voxel);
@@ -365,6 +426,10 @@ impl LocalMap {
         for key in to_remove {
             self.voxel_map.remove(&key);
         }
+
+        // 古いフレームの除去後、点数・観測フレーム数・周辺surface統計を更新する。
+        // surface統計の再計算は Rayon で並列化する。
+        self.refresh_valid_and_surface_stats_parallel(&recompute_keys);
     }
 
     /// `center` から `radius` [m] 以内の全点を収集して返す。
@@ -385,28 +450,33 @@ impl LocalMap {
         let cy = (center.y / vs).floor() as i32;
         let cz = (center.z / vs).floor() as i32;
 
-        let mut result = Vec::new();
-
+        let mut keys = Vec::new();
         for ix in (cx - half)..=(cx + half) {
             for iy in (cy - half)..=(cy + half) {
                 for iz in (cz - half)..=(cz + half) {
-                    let key = VoxelKey { ix, iy, iz };
-                    let Some(cell) = self.voxel_map.get(&key) else {
-                        continue;
-                    };
-                    for (p, _) in &cell.points {
-                        let dx = p.x - center.x;
-                        let dy = p.y - center.y;
-                        let dz = p.z - center.z;
-                        if dx * dx + dy * dy + dz * dz <= r_sq {
-                            result.push(*p);
-                        }
-                    }
+                    keys.push(VoxelKey { ix, iy, iz });
                 }
             }
         }
 
-        result
+        keys.par_iter()
+            .flat_map_iter(|key| {
+                self.voxel_map
+                    .get(key)
+                    .into_iter()
+                    .flat_map(|cell| cell.points.iter())
+                    .filter_map(move |(p, _)| {
+                        let dx = p.x - center.x;
+                        let dy = p.y - center.y;
+                        let dz = p.z - center.z;
+                        if dx * dx + dy * dy + dz * dz <= r_sq {
+                            Some(*p)
+                        } else {
+                            None
+                        }
+                    })
+            })
+            .collect()
     }
 
     pub fn query_stable_points_within_radius(
@@ -422,33 +492,251 @@ impl LocalMap {
         let cy = (center.y / vs).floor() as i32;
         let cz = (center.z / vs).floor() as i32;
 
-        let mut result = Vec::new();
-
+        let mut keys = Vec::new();
         for ix in (cx - half)..=(cx + half) {
             for iy in (cy - half)..=(cy + half) {
                 for iz in (cz - half)..=(cz + half) {
-                    let key = VoxelKey { ix, iy, iz };
-                    let Some(cell) = self.voxel_map.get(&key) else {
-                        continue;
-                    };
-
-                    if !cell.valid {
-                        continue;
-                    }
-
-                    for (p, _) in &cell.points {
-                        let dx = p.x - center.x;
-                        let dy = p.y - center.y;
-                        let dz = p.z - center.z;
-
-                        if dx * dx + dy * dy + dz * dz <= r_sq {
-                            result.push(*p);
-                        }
-                    }
+                    keys.push(VoxelKey { ix, iy, iz });
                 }
             }
         }
 
-        result
+        keys.par_iter()
+            .flat_map_iter(|key| {
+                self.voxel_map
+                    .get(key)
+                    .filter(|cell| cell.valid)
+                    .into_iter()
+                    .flat_map(|cell| cell.points.iter())
+                    .filter_map(move |(p, _)| {
+                        let dx = p.x - center.x;
+                        let dy = p.y - center.y;
+                        let dz = p.z - center.z;
+                        if dx * dx + dy * dy + dz * dz <= r_sq {
+                            Some(*p)
+                        } else {
+                            None
+                        }
+                    })
+            })
+            .collect()
     }
+
+    fn refresh_valid_and_surface_stats_parallel(&mut self, keys: &FxHashSet<VoxelKey>) {
+        if keys.is_empty() {
+            return;
+        }
+
+        // まず valid だけ逐次更新する。
+        // observed_frame_count() は cell.points を見るため、HashMap のmutable更新中に並列化しない。
+        for &key in keys {
+            if let Some(cell) = self.voxel_map.get_mut(&key) {
+                cell.valid = cell.point_count() >= self.config.min_points_per_voxel
+                    && cell.observed_frame_count() >= self.config.min_observed_frames_per_voxel;
+            }
+        }
+
+        // surface統計は immutable read だけで計算できるため Rayon で並列化する。
+        // 結果の書き戻しだけ最後に逐次で行う。
+        let key_vec: Vec<VoxelKey> = keys.iter().copied().collect();
+        let updates: Vec<SurfaceUpdate> = key_vec
+            .par_iter()
+            .map(|&key| self.compute_surface_update_for_key(key))
+            .collect();
+
+        for update in updates {
+            self.apply_surface_update(update);
+        }
+    }
+
+    fn compute_surface_update_for_key(&self, key: VoxelKey) -> SurfaceUpdate {
+        let neighbor_means: Vec<Point3<f32>> = neighbor_keys(&key)
+            .into_iter()
+            .filter_map(|nk| self.voxel_map.get(&nk))
+            .filter(|c| c.point_count() >= self.config.min_points_per_voxel)
+            .map(|c| c.mean)
+            .collect();
+
+        let Some(cov) = compute_covariance_from_points(&neighbor_means) else {
+            return SurfaceUpdate::Invalid { key };
+        };
+
+        let Some((normal, linearity, planarity, scattering)) =
+            compute_shape_from_covariance(cov)
+        else {
+            return SurfaceUpdate::Invalid { key };
+        };
+
+        let Some(cell) = self.voxel_map.get(&key) else {
+            return SurfaceUpdate::Invalid { key };
+        };
+
+        let surface_valid = cell.valid
+            && cell.observed_frame_count() >= self.config.min_observed_frames_per_voxel
+            && planarity > 0.35
+            && scattering < 0.25;
+
+        SurfaceUpdate::Valid {
+            key,
+            stats: SurfaceStats {
+                covariance: cov,
+                normal,
+                linearity,
+                planarity,
+                scattering,
+                surface_valid,
+            },
+        }
+    }
+
+    fn apply_surface_update(&mut self, update: SurfaceUpdate) {
+        match update {
+            SurfaceUpdate::Invalid { key } => {
+                if let Some(cell) = self.voxel_map.get_mut(&key) {
+                    cell.surface_valid = false;
+                }
+            }
+            SurfaceUpdate::Valid { key, stats } => {
+                if let Some(cell) = self.voxel_map.get_mut(&key) {
+                    cell.covariance = stats.covariance;
+                    cell.normal = stats.normal;
+                    cell.linearity = stats.linearity;
+                    cell.planarity = stats.planarity;
+                    cell.scattering = stats.scattering;
+                    cell.surface_valid = stats.surface_valid;
+                }
+            }
+        }
+    }
+
+    fn should_accept_by_normal_gate(&self, p: &Point3<f32>) -> bool {
+        let key = voxel_key(p, self.config.index_voxel_size);
+
+        let mut found_surface = false;
+        let mut best_normal_dist = f32::INFINITY;
+
+        for nk in neighbor_keys(&key) {
+            let Some(cell) = self.voxel_map.get(&nk) else {
+                continue;
+            };
+
+            if !cell.surface_valid {
+                continue;
+            }
+
+            let diff = p.coords - cell.mean.coords;
+            let signed_normal_dist = diff.dot(&cell.normal);
+            let normal_dist = signed_normal_dist.abs();
+
+            let tangent_vec = diff - cell.normal * signed_normal_dist;
+            let tangent_dist = tangent_vec.norm();
+
+            // 同じ面パッチ周辺だけを見る。
+            // 離れた別の平面のnormalで誤って弾かないための制限。
+            if tangent_dist > self.config.index_voxel_size * 1.5 {
+                continue;
+            }
+
+            found_surface = true;
+            best_normal_dist = best_normal_dist.min(normal_dist);
+        }
+
+        // 近くに安定平面がなければ、新規構造候補として許可。
+        if !found_surface {
+            return true;
+        }
+
+        // 近くに安定平面があるなら、法線方向に離れた点は追加しない。
+        best_normal_dist < 0.01
+    }
+
+    /// 既存のstable surfaceに対して、各点をmapへ追加してよいか判定するmaskを返す。
+    ///
+    /// 入力点群は LocalMap と同じ座標系、つまり現在の使い方では world 座標系を想定する。
+    /// `true` ならmap保存用点群へ残し、`false` なら壁などの法線方向に浮いた点として除外する。
+    pub fn surface_insert_mask(&self, points_world: &[Point3<f32>]) -> Vec<bool> {
+        points_world
+            .par_iter()
+            .map(|p| self.should_accept_by_normal_gate(p))
+            .collect()
+    }
+
+    /// `surface_insert_mask` の簡易版。
+    /// world座標点群から、normal gateを通過した点だけを返す。
+    pub fn filter_points_by_surface_gate(
+        &self,
+        points_world: &[Point3<f32>],
+    ) -> Vec<Point3<f32>> {
+        points_world
+            .par_iter()
+            .copied()
+            .filter(|p| self.should_accept_by_normal_gate(p))
+            .collect()
+    }
+}
+
+
+fn compute_covariance_from_points(points: &[Point3<f32>]) -> Option<Matrix3<f32>> {
+    if points.len() < 5 {
+        return None;
+    }
+
+    let mut mean = Vector3::zeros();
+    for p in points {
+        mean += p.coords;
+    }
+    mean /= points.len() as f32;
+
+    let mut cov = Matrix3::<f32>::zeros();
+    for p in points {
+        let d = p.coords - mean;
+        cov += d * d.transpose();
+    }
+    cov /= points.len() as f32;
+
+    if !cov.iter().all(|v| v.is_finite()) {
+        return None;
+    }
+
+    Some(cov)
+}
+
+fn compute_shape_from_covariance(
+    cov: Matrix3<f32>,
+) -> Option<(Vector3<f32>, f32, f32, f32)> {
+    let eig = SymmetricEigen::new(cov);
+
+    let mut ids = [0usize, 1, 2];
+    ids.sort_by(|&a, &b| {
+        eig.eigenvalues[a]
+            .partial_cmp(&eig.eigenvalues[b])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let l0 = eig.eigenvalues[ids[0]].max(1.0e-6);
+    let l1 = eig.eigenvalues[ids[1]].max(1.0e-6);
+    let l2 = eig.eigenvalues[ids[2]].max(1.0e-6);
+
+    if !l0.is_finite() || !l1.is_finite() || !l2.is_finite() || l2 <= 1.0e-6 {
+        return None;
+    }
+
+    let normal_col = eig.eigenvectors.column(ids[0]);
+    let normal = Vector3::new(normal_col[0], normal_col[1], normal_col[2]);
+
+    if !normal.iter().all(|v| v.is_finite()) || normal.norm_squared() < 1.0e-8 {
+        return None;
+    }
+
+    let normal = normal.normalize();
+
+    let linearity = (l2 - l1) / l2;
+    let planarity = (l1 - l0) / l2;
+    let scattering = l0 / l2;
+
+    if !linearity.is_finite() || !planarity.is_finite() || !scattering.is_finite() {
+        return None;
+    }
+
+    Some((normal, linearity, planarity, scattering))
 }

@@ -35,7 +35,7 @@ use gicp_slam_vulkan::{
 };
 use nalgebra::{Matrix4, Point3, Quaternion, UnitQuaternion, Vector3};
 
-const LOAD_DIR: &str = "data/input/05242026/path03";
+const LOAD_DIR: &str = "data/input/05302026/park02";
 const SAVE_DIR: &str = "data/output/05302026/debug";
 
 const DOWNSAMPLE_VOXEL_SIZE: f32 = 0.2; // m
@@ -364,11 +364,33 @@ fn main() -> Result<()> {
 
         let frame_pose_world = matrix4_to_isometry3(&current_transform);
 
+        let mut downsampled_source_points_world = downsampled_source_points.clone();
+        for p in &mut downsampled_source_points_world {
+            let p_world = frame_pose_world.transform_point(&p.cast::<f64>()).cast::<f32>();
+            *p = p_world;
+        }
+
+        // local mapを基準にmap保存用maskを作る
+        let map_mask = local_voxel_map.surface_insert_mask(&downsampled_source_points_world);
+
+        // map用 lidar点群 / world点群を作る
+        let points_lidar_map: Vec<Point3<f32>> = downsampled_source_points
+            .iter()
+            .zip(map_mask.iter())
+            .filter_map(|(p, keep)| if *keep { Some(*p) } else { None })
+            .collect();
+
+        let points_world_map: Vec<Point3<f32>> = downsampled_source_points_world
+            .iter()
+            .zip(map_mask.iter())
+            .filter_map(|(p, keep)| if *keep { Some(*p) } else { None })
+            .collect();
+
         if let Some(new_submap_id) = submap_manager.insert_frame(
             i as u64,
             frame_pose_world,
-            &downsampled_source_points,
-            &downsampled_source_points,
+            &downsampled_source_points,       // registration用（LiDARローカル座標）
+            &points_lidar_map,                // map保存用
         ) {
             log::info!(
                 "Created submap {} / total submaps = {}",
@@ -521,14 +543,14 @@ fn main() -> Result<()> {
             .cast::<f32>();
 
         // lidar coord to global coord
-        for p in &mut downsampled_source_points {
-            let rotated = rotation * p.coords + translation;
-            p.coords = rotated;
-        }
+        // for p in &mut downsampled_source_points {
+        //     let rotated = rotation * p.coords + translation;
+        //     p.coords = rotated;
+        // }
 
         let start_update_voxel_map = Instant::now();
-        local_voxel_map.insert_frame(&downsampled_source_points, origin);
-        global_voxel_map.insert_frame(&downsampled_source_points, origin);
+        local_voxel_map.insert_frame(&points_world_map, origin);
+        global_voxel_map.insert_frame(&points_world_map, origin);
         let duration_update_voxel_map = start_update_voxel_map.elapsed();
         performance_logs
             .update_voxel_map_time_ms
@@ -558,7 +580,7 @@ fn main() -> Result<()> {
 
     let submap_global_points_vec = convert_point3_to_vec(&submap_global_points);
 
-    let voxel_size = 0.25;
+    let voxel_size = 0.1;
     let inv_voxel_size = 1.0 / voxel_size;
     let mut voxel_map: std::collections::HashMap<(i64, i64, i64), ([f64; 3], usize)> =
         std::collections::HashMap::new();
