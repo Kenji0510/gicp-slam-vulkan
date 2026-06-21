@@ -8,8 +8,8 @@ use gicp_slam_vulkan::{
     },
     deskew_points::deskew_points,
     file_handler::{
-        load_imu_data, load_pcd_files, load_pcd_xyzit, save_pcd_xyzcov, save_pcd_xyzit,
-        save_pcd_xyznormal,
+        load_imu_data, load_pcd_files, load_pcd_xyzit, save_pcd_xyz_shape, save_pcd_xyzcov,
+        save_pcd_xyzit, save_pcd_xyznormal,
     },
     gpu_copy::GpuTransferDataContext,
     gpu_covariances::{self, combine_pts_with_normals},
@@ -35,8 +35,8 @@ use gicp_slam_vulkan::{
 };
 use nalgebra::{Matrix4, Point3, Quaternion, UnitQuaternion, Vector3};
 
-const LOAD_DIR: &str = "data/input/05302026/park02";
-const SAVE_DIR: &str = "data/output/05302026/debug";
+const LOAD_DIR: &str = "data/input/06212026/park01";
+const SAVE_DIR: &str = "data/output/06212026/debug";
 
 const DOWNSAMPLE_VOXEL_SIZE: f32 = 0.2; // m
 const GICP_ITERATIONS: usize = 5; // Default: 5
@@ -79,7 +79,7 @@ const LOOP_MAX_DIST_SQ: f32 = 0.09;
 const LOOP_MIN_MATCH_RATIO: f32 = 0.20;
 
 const LOOP_MIN_VALID_RATIO: f32 = 0.35;
-const LOOP_MAX_RMSE: f32 = 0.25; 
+const LOOP_MAX_RMSE: f32 = 0.25;
 const LOOP_MAX_TRANSLATION_CORRECTION: f32 = 5.0;
 const LOOP_MAX_ROTATION_CORRECTION_RAD: f32 = 20.0_f32.to_radians();
 // --- For loop closuer ---
@@ -366,7 +366,9 @@ fn main() -> Result<()> {
 
         let mut downsampled_source_points_world = downsampled_source_points.clone();
         for p in &mut downsampled_source_points_world {
-            let p_world = frame_pose_world.transform_point(&p.cast::<f64>()).cast::<f32>();
+            let p_world = frame_pose_world
+                .transform_point(&p.cast::<f64>())
+                .cast::<f32>();
             *p = p_world;
         }
 
@@ -389,8 +391,8 @@ fn main() -> Result<()> {
         if let Some(new_submap_id) = submap_manager.insert_frame(
             i as u64,
             frame_pose_world,
-            &downsampled_source_points,       // registration用（LiDARローカル座標）
-            &points_lidar_map,                // map保存用
+            &downsampled_source_points, // registration用（LiDARローカル座標）
+            &points_lidar_map,          // map保存用
         ) {
             log::info!(
                 "Created submap {} / total submaps = {}",
@@ -618,6 +620,37 @@ fn main() -> Result<()> {
         "Saved final submap map: {}, submaps={}",
         save_path,
         submap_manager.len()
+    );
+
+    let mut submap_shape_points = Vec::new();
+
+    for p_arr in &downsampled_sub_map_points_vec {
+        let p = Point3::new(p_arr[0], p_arr[1], p_arr[2]);
+
+        if let Some(feature) = global_voxel_map.surface_feature_at(&p) {
+            submap_shape_points.push(gicp_slam_vulkan::types::PointXYZShape {
+                x: p.x,
+                y: p.y,
+                z: p.z,
+
+                normal_x: feature.normal.x,
+                normal_y: feature.normal.y,
+                normal_z: feature.normal.z,
+
+                linearity: feature.linearity,
+                planarity: feature.planarity,
+                scattering: feature.scattering,
+            });
+        }
+    }
+
+    let save_path = format!("{}/final_submap_map_shape.pcd", SAVE_DIR);
+    save_pcd_xyz_shape(&submap_shape_points, &save_path)?;
+
+    log::info!(
+        "Saved final submap shape map: {}, points={}",
+        save_path,
+        submap_shape_points.len()
     );
 
     // --- Save logs ---

@@ -182,12 +182,13 @@ pub fn invert_matrix3_safe(m: Matrix3<f32>) -> Option<Matrix3<f32>> {
     m.try_inverse()
 }
 
-fn neighbor_keys(key: &VoxelKey) -> impl IntoIterator<Item = VoxelKey> {
-    let mut neighbors = Vec::with_capacity(27);
+fn neighbor_keys_with_range(key: &VoxelKey, range: i32) -> Vec<VoxelKey> {
+    let side = 2 * range + 1;
+    let mut neighbors = Vec::with_capacity((side * side * side) as usize);
 
-    for dx in -1..=1 {
-        for dy in -1..=1 {
-            for dz in -1..=1 {
+    for dx in -range..=range {
+        for dy in -range..=range {
+            for dz in -range..=range {
                 neighbors.push(VoxelKey {
                     ix: key.ix + dx,
                     iy: key.iy + dy,
@@ -243,6 +244,14 @@ pub fn build_gicp_voxel_map(
     // }
 
     voxel_map
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SurfaceFeature {
+    pub normal: Vector3<f32>,
+    pub linearity: f32,
+    pub planarity: f32,
+    pub scattering: f32,
 }
 
 // ---------------------------------------------------------------------------
@@ -304,6 +313,38 @@ impl LocalMap {
         }
     }
 
+    pub fn surface_feature_at(&self, p: &Point3<f32>) -> Option<SurfaceFeature> {
+        let key = voxel_key(p, self.config.index_voxel_size);
+
+        let mut best_dist_sq = f32::INFINITY;
+        let mut best_feature = None;
+
+        for nk in neighbor_keys_with_range(&key, 2) {
+            let Some(cell) = self.voxel_map.get(&nk) else {
+                continue;
+            };
+
+            if !cell.surface_valid {
+                continue;
+            }
+
+            let d = p.coords - cell.mean.coords;
+            let dist_sq = d.norm_squared();
+
+            if dist_sq < best_dist_sq {
+                best_dist_sq = dist_sq;
+                best_feature = Some(SurfaceFeature {
+                    normal: cell.normal,
+                    linearity: cell.linearity,
+                    planarity: cell.planarity,
+                    scattering: cell.scattering,
+                });
+            }
+        }
+
+        best_feature
+    }
+
     pub fn get_all_points(&self) -> Vec<Point3<f32>> {
         self.voxel_map
             .values()
@@ -322,11 +363,7 @@ impl LocalMap {
 
     /// normal gate も LocalMap 側で実行したい場合の互換用関数。
     /// 通常の SLAM ループでは、mask を一度だけ作って `insert_frame()` に渡す方が速い。
-    pub fn insert_frame_with_surface_gate(
-        &mut self,
-        points: &[Point3<f32>],
-        origin: Point3<f32>,
-    ) {
+    pub fn insert_frame_with_surface_gate(&mut self, points: &[Point3<f32>], origin: Point3<f32>) {
         let filtered_points: Vec<Point3<f32>> = points
             .par_iter()
             .copied()
@@ -352,7 +389,7 @@ impl LocalMap {
                 dirty_keys.insert(key);
 
                 // 周辺cellの共分散も変わるので近傍もdirtyにする
-                for nk in neighbor_keys(&key) {
+                for nk in neighbor_keys_with_range(&key, 2) {
                     dirty_keys.insert(nk);
                 }
             }
@@ -410,7 +447,7 @@ impl LocalMap {
 
         for &key in &entry.dirty_keys {
             recompute_keys.insert(key);
-            for nk in neighbor_keys(&key) {
+            for nk in neighbor_keys_with_range(&key, 2) {
                 recompute_keys.insert(nk);
             }
 
@@ -550,7 +587,7 @@ impl LocalMap {
     }
 
     fn compute_surface_update_for_key(&self, key: VoxelKey) -> SurfaceUpdate {
-        let neighbor_means: Vec<Point3<f32>> = neighbor_keys(&key)
+        let neighbor_means: Vec<Point3<f32>> = neighbor_keys_with_range(&key, 2)
             .into_iter()
             .filter_map(|nk| self.voxel_map.get(&nk))
             .filter(|c| c.point_count() >= self.config.min_points_per_voxel)
@@ -561,8 +598,7 @@ impl LocalMap {
             return SurfaceUpdate::Invalid { key };
         };
 
-        let Some((normal, linearity, planarity, scattering)) =
-            compute_shape_from_covariance(cov)
+        let Some((normal, linearity, planarity, scattering)) = compute_shape_from_covariance(cov)
         else {
             return SurfaceUpdate::Invalid { key };
         };
@@ -615,7 +651,7 @@ impl LocalMap {
         let mut found_surface = false;
         let mut best_normal_dist = f32::INFINITY;
 
-        for nk in neighbor_keys(&key) {
+        for nk in neighbor_keys_with_range(&key, 2) {
             let Some(cell) = self.voxel_map.get(&nk) else {
                 continue;
             };
@@ -663,10 +699,7 @@ impl LocalMap {
 
     /// `surface_insert_mask` の簡易版。
     /// world座標点群から、normal gateを通過した点だけを返す。
-    pub fn filter_points_by_surface_gate(
-        &self,
-        points_world: &[Point3<f32>],
-    ) -> Vec<Point3<f32>> {
+    pub fn filter_points_by_surface_gate(&self, points_world: &[Point3<f32>]) -> Vec<Point3<f32>> {
         points_world
             .par_iter()
             .copied()
@@ -674,7 +707,6 @@ impl LocalMap {
             .collect()
     }
 }
-
 
 fn compute_covariance_from_points(points: &[Point3<f32>]) -> Option<Matrix3<f32>> {
     if points.len() < 5 {
@@ -701,9 +733,7 @@ fn compute_covariance_from_points(points: &[Point3<f32>]) -> Option<Matrix3<f32>
     Some(cov)
 }
 
-fn compute_shape_from_covariance(
-    cov: Matrix3<f32>,
-) -> Option<(Vector3<f32>, f32, f32, f32)> {
+fn compute_shape_from_covariance(cov: Matrix3<f32>) -> Option<(Vector3<f32>, f32, f32, f32)> {
     let eig = SymmetricEigen::new(cov);
 
     let mut ids = [0usize, 1, 2];

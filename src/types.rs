@@ -78,3 +78,18 @@ pub struct GPUContext {
     pub search_neighbor_gpu_context: SearchGpuContext,
     pub gicp_gpu_context: GicpGpuContext,
 }
+
+#[derive(Debug, Clone, PcdDeserialize, PcdSerialize)]
+pub struct PointXYZShape {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+
+    pub normal_x: f32,
+    pub normal_y: f32,
+    pub normal_z: f32,
+
+    pub linearity: f32,
+    pub planarity: f32,
+    pub scattering: f32,
+}
