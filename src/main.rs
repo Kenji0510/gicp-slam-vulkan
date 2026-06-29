@@ -110,6 +110,8 @@ fn main() -> Result<()> {
         merge_time_ms: Vec::new(),
         total_average_time_ms: Vec::new(),
         iteration_count: 0,
+        gicp_rmse_per_frame: Vec::new(),
+        loop_closure_rmse: Vec::new(),
     };
 
     // --- Initialize Vulkan context ---
@@ -340,7 +342,7 @@ fn main() -> Result<()> {
         };
 
         // --- Registration ---
-        let (frame_valid, current_transform, downsampled_source_points_vec) = registration(
+        let (frame_valid, current_transform, downsampled_source_points_vec, gicp_rmse) = registration(
             &points_vec,
             &local_map_points_vec,
             downsample_voxel_size,
@@ -349,6 +351,9 @@ fn main() -> Result<()> {
             &registration_params,
             &mut performance_logs,
         )?;
+        performance_logs
+            .gicp_rmse_per_frame
+            .push(if frame_valid { Some(gicp_rmse) } else { None });
         // --- Registration ---
 
         if !frame_valid {
@@ -460,6 +465,18 @@ fn main() -> Result<()> {
                             loop_constraint.score.valid_ratio * 100.0,
                             loop_constraint.score.rmse,
                         );
+
+                        // --- Record loop closure RMSE ---
+                        performance_logs.loop_closure_rmse.push(
+                            gicp_slam_vulkan::log_performance::LoopClosureRmseEntry {
+                                frame: i,
+                                current_submap_id: loop_constraint.current_id,
+                                candidate_submap_id: loop_constraint.candidate_id,
+                                rmse: loop_constraint.score.rmse,
+                                valid_ratio: loop_constraint.score.valid_ratio,
+                            },
+                        );
+                        // --- Record loop closure RMSE ---
 
                         loop_constraint.information = default_loop_information();
 

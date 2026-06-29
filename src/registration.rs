@@ -249,7 +249,7 @@ pub fn registration(
     gpu_context: &mut GPUContext,
     registration_params: &RegistrationParams,
     performance_logs: &mut PerformanceLogs,
-) -> Result<(bool, Matrix4<f64>, Vec<[f32; 3]>)> {
+) -> Result<(bool, Matrix4<f64>, Vec<[f32; 3]>, f32)> {
     let result = registration_with_metrics(
         source_points,
         target_points,
@@ -264,6 +264,7 @@ pub fn registration(
         result.frame_valid,
         result.transform,
         result.downsampled_source_points,
+        result.metrics.final_iter.rmse,
     ))
 }
 
