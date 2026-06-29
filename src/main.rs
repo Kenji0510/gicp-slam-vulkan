@@ -35,7 +35,7 @@ use gicp_slam_vulkan::{
 };
 use nalgebra::{Matrix4, Point3, Quaternion, UnitQuaternion, Vector3};
 
-const LOAD_DIR: &str = "data/input/06212026/park01";
+const LOAD_DIR: &str = "data/input/06212026/park05";
 const SAVE_DIR: &str = "data/output/06212026/debug";
 
 const DOWNSAMPLE_VOXEL_SIZE: f32 = 0.2; // m
@@ -80,7 +80,7 @@ const LOOP_MIN_MATCH_RATIO: f32 = 0.20;
 
 const LOOP_MIN_VALID_RATIO: f32 = 0.35;
 const LOOP_MAX_RMSE: f32 = 0.25; 
-const LOOP_MAX_TRANSLATION_CORRECTION: f32 = 5.0;
+const LOOP_MAX_TRANSLATION_CORRECTION: f32 = 15.0;
 const LOOP_MAX_ROTATION_CORRECTION_RAD: f32 = 20.0_f32.to_radians();
 // --- For loop closuer ---
 
@@ -482,20 +482,63 @@ fn main() -> Result<()> {
 
                         pose_graph.add_loop_constraint(&loop_constraint);
 
-                        let corrected = pose_graph.apply_current_submap_only_correction(
+                        // candidate_id ～ current_id の全サブマップに補正を線形補間で配布する。
+                        // apply_current_submap_only_correction では直近サブマップしか
+                        // 修正されず、中間サブマップのドリフトが最終マップに残る。
+                        pose_graph.apply_simple_loop_correction(
                             &mut submap_manager,
                             &loop_constraint,
+                            &SimpleLoopCorrectionConfig {
+                                // current より後のサブマップにも full correction を適用して
+                                // 以降のオドメトリが補正済み座標系で続くようにする。
+                                apply_to_submaps_after_current: true,
+                            },
                         );
 
-                        if corrected {
+                        // 補正後の current_global_pose と local_voxel_map を同期する。
+                        // そのままにすると次フレームの GICP がドリフトした地図に
+                        // 対して位置合わせし続けてしまう。
+                        if let Some(corrected_submap) =
+                            submap_manager.get(loop_constraint.current_id)
+                        {
+                            // current_global_pose を補正済みサブマップ pose に置き換える
+                            let corrected_mat =
+                                corrected_submap.pose_world.to_homogeneous();
+                            current_global_pose = corrected_mat;
+
+                            // local_voxel_map を補正済みサブマップ点から再構築
+                            let sensor_pos = Point3::new(
+                                corrected_mat[(0, 3)] as f32,
+                                corrected_mat[(1, 3)] as f32,
+                                corrected_mat[(2, 3)] as f32,
+                            );
+                            local_voxel_map = LocalMap::new(LocalMapConfig {
+                                index_voxel_size: LOCAL_MAP_INDEX_VOXEL_SIZE,
+                                max_points_per_voxel: MAX_POINTS_PER_VOXEL,
+                                min_points_per_voxel: MIN_POINTS_PER_VOXEL,
+                                max_frames: LOCAL_MAP_MAX_FRAMES,
+                                max_distance: LOCAL_MAP_MAX_DISTANCE,
+                                min_observed_frames_per_voxel: MIN_OBSERVED_FRAMES_PER_VOXEL,
+                            });
+                            for submap in &submap_manager.submaps {
+                                let pts = transform_submap_points_to_world(submap);
+                                local_voxel_map.insert_frame(&pts, sensor_pos);
+                            }
                             log::info!(
-                                "Current-only LoopClosure applied: candidate={} -> current={} valid_ratio={:.1}% rmse={:.4}",
-                                loop_constraint.candidate_id,
-                                loop_constraint.current_id,
-                                loop_constraint.score.valid_ratio * 100.0,
-                                loop_constraint.score.rmse,
+                                "Local voxel map rebuilt after loop correction ({} submaps)",
+                                submap_manager.len()
                             );
                         }
+
+                        let corrected = true;
+
+                        log::info!(
+                            "SimpleLoopCorrection applied: candidate={} -> current={} valid_ratio={:.1}% rmse={:.4}",
+                            loop_constraint.candidate_id,
+                            loop_constraint.current_id,
+                            loop_constraint.score.valid_ratio * 100.0,
+                            loop_constraint.score.rmse,
+                        );
 
                         log::info!(
                             "PoseGraph loop edge added: {} -> {}",

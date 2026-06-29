@@ -319,7 +319,24 @@ pub fn align_loop_candidate(
         .map(|p| [p.x, p.y, p.z])
         .collect();
 
-    let init_pose = Matrix4::<f64>::identity();
+    // source/target はどちらも world 座標だが、累積ドリフトがある場合に
+    // identity スタートだと初期オーバーラップがほぼゼロになる。
+    // candidate.pose_world * current.pose_world^{-1} を初期姿勢として渡し、
+    // ドリフト分を打ち消した状態から GICP を始める。
+    let init_pose = (candidate_submap.pose_world * current.pose_world.inverse())
+        .to_homogeneous();
+
+    log::debug!(
+        "Loop init_pose delta: t={:.3}m r={:.2}deg (candidate={} current={})",
+        (candidate_submap.pose_world.translation.vector
+            - current.pose_world.translation.vector)
+            .norm(),
+        (candidate_submap.pose_world.rotation * current.pose_world.rotation.inverse())
+            .angle()
+            .to_degrees(),
+        candidate.candidate_id,
+        candidate.current_id,
+    );
 
     let registration_params = RegistrationParams {
         gicp_iterations: config.gicp_iterations,
@@ -348,7 +365,12 @@ pub fn align_loop_candidate(
         return Ok(None);
     }
 
-    let delta_world = matrix4_to_isometry3(&result.transform);
+    // result.transform は init_pose から始まった追加補正。
+    // world 座標で current を正しい位置に動かす総合 delta は
+    // delta_gicp (GICP 精密補正) × init_iso (初期ドリフト推定) の合成。
+    let init_iso = matrix4_to_isometry3(&init_pose);
+    let delta_gicp = matrix4_to_isometry3(&result.transform);
+    let delta_world = delta_gicp * init_iso;
 
     let corrected_current_pose_world = delta_world * current.pose_world;
 
