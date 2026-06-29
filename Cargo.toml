@@ -26,4 +26,5 @@ rustc-hash = "2.1.2"
 plotters = "0.3.7"
 
 [build-dependencies]
-shaderc = "0.8"
+# shaderc = "0.8"
+shaderc = { version = "0.10", features = ["build-from-source"] }
